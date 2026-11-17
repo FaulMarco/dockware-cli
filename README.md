@@ -73,4 +73,4 @@ dockware-cli clone shop-stage --path /var/www/shop --code ~/projects/shop
 ```
 
 See [docs/clone.md](docs/clone.md) for prerequisites, the `.dockware-clone.yml` reference and the error table.
-Step-by-step guide in German: [docs/clone-anleitung.md](docs/clone-anleitung.md).
+Step-by-step guide: [docs/clone-guide.md](docs/clone-guide.md).
