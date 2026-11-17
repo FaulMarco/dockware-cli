@@ -546,7 +546,7 @@ echo "shopware=$(php -r '$l=json_decode(file_get_contents("composer.lock"),true)
 echo "storefront=$(test -d vendor/shopware/storefront && echo 1 || echo 0)"
 echo "composerauth=$(test -f auth.json && echo 1 || echo 0)"
 echo "appurl=$(php -r 'if(is_file("vendor/autoload.php")){require "vendor/autoload.php";} if(class_exists("Symfony\\Component\\Dotenv\\Dotenv")&&(is_file(".env")||is_file(".env.dist")||is_file(".env.local.php"))){(new Symfony\Component\Dotenv\Dotenv())->usePutenv()->bootEnv(getcwd()."/.env","prod");} echo getenv("APP_URL");')"
-echo "mediaurl=$(php -r '$u=""; foreach(glob("config/packages/*.yaml") as $f){ if(preg_match("/filesystem:\s*\n\s+public:\s*\n(?:\s+(?:type|config|root):.*\n)*\s+url:\s*[\"\x27]?([^\"\x27\s]+)/", file_get_contents($f), $m)){ $u=$m[1]; } } echo $u;')"
+echo "mediaurl=$(php -r 'if(is_file("vendor/autoload.php")){require "vendor/autoload.php";} if(class_exists("Symfony\\Component\\Dotenv\\Dotenv")&&(is_file(".env")||is_file(".env.dist")||is_file(".env.local.php"))){(new Symfony\Component\Dotenv\Dotenv())->usePutenv()->bootEnv(getcwd()."/.env","prod");} $e=getenv("APP_ENV")?:"prod"; $u=""; foreach(array_merge(glob("config/packages/*.y*ml"), preg_match("/^[A-Za-z0-9_-]+$/",$e)?glob("config/packages/$e/*.y*ml"):[]) as $f){ if(preg_match("/filesystem:\s*\n\s+public:\s*\n(?:\s+(?:type|config|root):.*\n)*\s+url:\s*[\"\x27]?([^\"\x27\s]+)/", file_get_contents($f), $m)){ $u=$m[1]; } } echo preg_replace_callback("/%env\((?:string:)?([A-Za-z0-9_]+)\)%/", function($m){ return (string)getenv($m[1]); }, $u);')"
 echo "--env--"
 `+envScanScript+`
 echo "--php-modules--"

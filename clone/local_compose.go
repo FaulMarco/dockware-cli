@@ -111,7 +111,7 @@ func (l *Local) shopVolumes() []string {
 	)
 }
 
-var mediaURLRe = regexp.MustCompile(`^https?://[^\s"'$%\\]+$`)
+var mediaURLRe = regexp.MustCompile(`^https?://[^\s"'$%\\@]+$`)
 
 // ValidMediaURL reports whether url is safe to embed in the Apache rewrite.
 func ValidMediaURL(url string) bool { return mediaURLRe.MatchString(url) }

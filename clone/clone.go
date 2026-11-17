@@ -578,6 +578,18 @@ func Run(ctx context.Context, o Options) (err error) {
 		}
 	}
 	phase("code", t)
+	remoteFS := RemoteFilesystems(l.CodeDir, l.AppEnv)
+	fsNames := make([]string, 0, len(remoteFS))
+	for name := range remoteFS {
+		fsNames = append(fsNames, name)
+	}
+	sort.Strings(fsNames)
+	for _, name := range fsNames {
+		fmt.Fprintf(log, "  filesystem %s is %s on the source, local in the clone (config/packages/%s/%s)\n", name, remoteFS[name], l.AppEnv, FilesystemOverrideFile)
+	}
+	if err := WriteFilesystemOverride(l.CodeDir, l.AppEnv, fsNames); err != nil {
+		return localFail(Fail(StepConfig, "cannot write the filesystem override", err, ""))
+	}
 	node, nodeSource := o.Node, "--node"
 	if node == "" {
 		node, nodeSource = cfg.Node, "config"
