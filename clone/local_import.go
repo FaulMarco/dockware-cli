@@ -295,10 +295,11 @@ func (l *Local) PostImport(ctx context.Context, p *Probe, domains map[string]str
 	}
 	list, _ := l.Console(ctx, "list", "system", "--raw")
 	var steps [][]string
-	// config/jwt stays on the server (CodeExcludes); before 6.7 the Admin and
-	// Store API sign with these files, so code synced by the clone needs its own
-	// pair. 6.7 signs with APP_SECRET and has no such command.
-	if l.OwnsCode && strings.Contains(list, "system:generate-jwt-secret") {
+	// config/jwt stays on the server (CodeExcludes) and a checkout ignores it;
+	// before 6.7 the Admin and Store API sign with these files, so a clone
+	// without them answers every request with 500. 6.7 signs with APP_SECRET
+	// and has no such command.
+	if strings.Contains(list, "system:generate-jwt-secret") {
 		if _, err := os.Stat(filepath.Join(l.CodeDir, "config", "jwt", "private.pem")); os.IsNotExist(err) {
 			steps = append(steps, []string{"system:generate-jwt-secret", "-n"})
 		}
