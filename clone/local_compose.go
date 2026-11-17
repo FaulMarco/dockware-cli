@@ -317,11 +317,13 @@ func (l *Local) started(ctx context.Context) error {
 		return err
 	}
 	// fresh named volumes are root-owned; the image ships one ssh key pair
-	// identical in every pull, which must never authenticate anything
+	// identical in every pull, which must never authenticate anything. The
+	// cache volume survives reruns, and a prod kernel never checks whether its
+	// compiled container still matches the code (e.g. after switching --code).
 	out, err := l.execRoot(ctx, "chown www-data:www-data "+strings.Join([]string{
 		containerRoot + "/vendor", containerRoot + "/var/cache", containerRoot + "/var/log",
 		containerRoot + "/public/theme", containerRoot + "/public/bundles",
-	}, " ")+" && rm -f /var/www/.ssh/id_rsa /var/www/.ssh/id_rsa.pub")
+	}, " ")+" && find "+containerRoot+"/var/cache -mindepth 1 -delete && rm -f /var/www/.ssh/id_rsa /var/www/.ssh/id_rsa.pub")
 	if err != nil {
 		return Fail(StepDocker, "preparing the volumes of "+l.container()+" failed", err, tailLines(out, 20))
 	}
