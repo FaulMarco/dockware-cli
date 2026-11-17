@@ -1128,16 +1128,32 @@ func httpCheck(ctx context.Context, name, method, u string, headers map[string]s
 func Smoke(ctx context.Context, l *Local, p *Probe, domains map[string]string, keys map[string]string, order []string) []Check {
 	var checks []Check
 	if p.HasStorefront {
-		for _, d := range p.Domains {
-			if d.TypeID != SalesChannelTypeStorefront || domains[d.URL] == "" {
+		var pick *Domain
+		for i, d := range p.Domains {
+			local := domains[d.URL]
+			if d.TypeID != SalesChannelTypeStorefront || local == "" {
 				continue
 			}
-			c, _ := httpCheck(ctx, "storefront "+d.Name, http.MethodGet, domains[d.URL]+"/", nil, "", http.StatusOK)
+			if pick == nil {
+				pick = &p.Domains[i]
+			}
+			// other storefront channels may serve a headless frontend only and 404 on the source too
+			if local == l.ShopURL() || strings.HasPrefix(local, l.ShopURL()+"/") {
+				pick = &p.Domains[i]
+				break
+			}
+		}
+		if pick != nil {
+			c, _ := httpCheck(ctx, "storefront "+pick.Name, http.MethodGet, domains[pick.URL]+"/", nil, "", http.StatusOK)
 			checks = append(checks, c)
-			break
 		}
 	}
 	for _, name := range order {
+		if !strings.HasPrefix(keys[name], "SWSC") {
+			// Shopware maps the key prefix to the origin and rejects any other prefix, on the server too
+			checks = append(checks, Check{Name: "store-api " + name, OK: true, Detail: "skipped: access key " + keys[name] + " has no SWSC prefix, the source rejects it too"})
+			continue
+		}
 		c, _ := httpCheck(ctx, "store-api "+name, http.MethodPost, l.ShopURL()+"/store-api/product", map[string]string{
 			"sw-access-key": keys[name], "Content-Type": "application/json", "Accept": "application/json",
 		}, `{"limit":1}`, http.StatusOK)
