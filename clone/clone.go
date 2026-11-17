@@ -878,7 +878,7 @@ func Run(ctx context.Context, o Options) (err error) {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(log, "==> starting frontend %s (%s) on port %d\n", l.Frontend.Path, l.FrontendImage(), l.FrontPort)
+		fmt.Fprintf(log, "==> starting frontend %s (%s) on port %d\n", l.Frontend.Name(), l.FrontendImage(), l.FrontPort)
 		if err := l.StartFrontend(ctx, env); err != nil {
 			return err
 		}
@@ -1179,7 +1179,7 @@ func Smoke(ctx context.Context, l *Local, p *Probe, domains map[string]string, k
 		deadline := time.Now().Add(10 * time.Minute)
 		var last Check
 		for time.Now().Before(deadline) {
-			last, _ = httpCheck(ctx, "frontend SSR "+l.Frontend.Path, http.MethodGet, u, nil, "", http.StatusOK)
+			last, _ = httpCheck(ctx, "frontend SSR "+l.Frontend.Name(), http.MethodGet, u, nil, "", http.StatusOK)
 			if last.OK {
 				break
 			}

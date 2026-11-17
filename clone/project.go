@@ -177,6 +177,15 @@ func (f *FrontendConfig) AppDir(codeDir string) string {
 	return filepath.Join(f.Dir(codeDir), f.Workdir)
 }
 
+// Name labels the frontend in the log: the app directory, below the code or below its own repository.
+func (f *FrontendConfig) Name() string {
+	root := f.Path
+	if filepath.IsAbs(root) {
+		root = filepath.Base(root)
+	}
+	return filepath.ToSlash(filepath.Join(root, f.Workdir))
+}
+
 var kindNames = map[Kind]bool{
 	KindEmail: true, KindFirstName: true, KindLastName: true, KindCompany: true, KindStreet: true,
 	KindZip: true, KindCity: true, KindPhone: true, KindIP: true, KindUsername: true, KindToken: true,
