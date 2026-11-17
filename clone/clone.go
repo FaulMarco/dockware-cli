@@ -410,7 +410,8 @@ func Run(ctx context.Context, o Options) (err error) {
 
 	// 5. local environment
 	step = StepDocker
-	l.Port = FreePort(o.Port)
+	own := ProjectPorts(ctx, l.Name)
+	l.Port = FreePort(o.Port, own)
 	var unset, reserved []string
 	l.Env, unset, reserved = BuildEnv(p, l, cfg.Env)
 	audit.UnsetEnv = unset
@@ -428,7 +429,7 @@ func Run(ctx context.Context, o Options) (err error) {
 	}
 	if cfg.Frontend != nil && !o.NoFrontend {
 		l.Frontend = cfg.Frontend
-		l.FrontPort = FreePort(o.FrontendPort)
+		l.FrontPort = FreePort(o.FrontendPort, own)
 	}
 	if err := l.WriteFiles(); err != nil {
 		return localFail(err)

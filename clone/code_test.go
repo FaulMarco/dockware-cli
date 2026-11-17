@@ -150,7 +150,7 @@ func TestRsyncArgsOrderUserExcludesThenFixturesThenBuiltins(t *testing.T) {
 	if strings.Contains(joined, "--dry-run") {
 		t.Fatalf("real run must not be a dry run: %q", args)
 	}
-	if !strings.Contains(joined, "\x00- /vendor/\x00") || !strings.Contains(joined, "'-p' '2222'") {
+	if !strings.Contains(joined, "\x00- /vendor\x00") || !strings.Contains(joined, "'-p' '2222'") {
 		t.Fatalf("vendor exclude or ssh port missing in %q", args)
 	}
 	if args[len(args)-2] != "shop:/srv/shop/" || args[len(args)-1] != "/tmp/code/" {
@@ -211,6 +211,50 @@ func TestRsyncFiltersKeepFixturesAndDropExports(t *testing.T) {
 		got[strings.TrimSpace(line)] = true
 	}
 	for p, want := range files {
+		if got[p] != want {
+			t.Errorf("%s transferred=%v, want %v\n%s", p, got[p], want, out)
+		}
+	}
+}
+
+// TestRsyncFiltersSkipSharedDirSymlinks covers deploy layouts (Deployer,
+// release directories) where the data directories are symlinks into a shared
+// directory: copied as-is they dangle on the laptop, and Shopware fails to
+// create e.g. files/ in the container. Code symlinks still transfer.
+func TestRsyncFiltersSkipSharedDirSymlinks(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not installed")
+	}
+	src := t.TempDir()
+	links := map[string]bool{
+		"files":                     false,
+		"var":                       false,
+		"public/media":              false,
+		"public/thumbnail":          false,
+		"public/sitemap":            false,
+		"public/theme":              false,
+		"custom/plugins/Acme/files": true,
+		"bin/console-link":          true,
+	}
+	for p := range links {
+		full := filepath.Join(src, p)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("/srv/shared/"+filepath.Base(p)+"/", full); err != nil {
+			t.Fatal(err)
+		}
+	}
+	args := append([]string{"-a", "--dry-run", "--out-format=%n"}, rsyncFilters(nil)...)
+	out, err := exec.Command("rsync", append(args, src+"/", t.TempDir()+"/")...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("rsync: %v\n%s", err, out)
+	}
+	got := map[string]bool{}
+	for _, line := range strings.Split(string(out), "\n") {
+		got[strings.TrimSpace(line)] = true
+	}
+	for p, want := range links {
 		if got[p] != want {
 			t.Errorf("%s transferred=%v, want %v\n%s", p, got[p], want, out)
 		}

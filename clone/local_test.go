@@ -4,11 +4,35 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestFreePortKeepsPortOfPreviousRun: a rerun of the same project must keep
+// --port even though the previous run's container still publishes it; other
+// busy ports are skipped.
+func TestFreePortKeepsPortOfPreviousRun(t *testing.T) {
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	busy := ln.Addr().(*net.TCPAddr).Port
+
+	if got := FreePort(busy, nil); got == busy {
+		t.Errorf("port %d is busy and not the project's, FreePort returned it", busy)
+	}
+	own := publishedPorts(fmt.Sprintf("0.0.0.0:%d->80/tcp, [::]:%d->80/tcp\n6379/tcp\n", busy, busy))
+	if got := FreePort(busy, own); got != busy {
+		t.Errorf("own port %d: got %d", busy, got)
+	}
+	if len(own) != 1 {
+		t.Errorf("unpublished container ports must not count: %v", own)
+	}
+}
 
 func TestFrontendImagePinnedNodeBeatsCheckout(t *testing.T) {
 	code := t.TempDir()

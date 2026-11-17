@@ -85,7 +85,7 @@ var localDBSteps = []string{StepImport, StepPostImport, StepVerify}
 var hints = []hint{
 	// composer's git failures quote ssh messages; they need the agent hint, not the login one
 	{[]string{StepComposer}, regexp.MustCompile(`(?i)Permission denied \(publickey\)|Could not read from remote repository|Host key verification failed`),
-		"a private git package needs your ssh key: load it into the ssh agent (`ssh-add -l` must list it); the agent is forwarded into the container"},
+		"a private git package needs your ssh key: load it into the ssh agent (`ssh-add -l` must list it); the agent is forwarded into the container. For GitHub packages a github-oauth token (e.g. from `gh auth token`) in auth.json, --composer-auth or COMPOSER_AUTH works too"},
 	{nil, regexp.MustCompile(`agent refused operation|communication with agent failed|sign_and_send_pubkey: signing failed`),
 		"the ssh agent could not sign: unlock 1Password (or your agent) and approve the request, check `ssh-add -l`, or pass --identity <key>"},
 	{serverSteps, regexp.MustCompile(`Permission denied \((publickey|password|keyboard-interactive)`),

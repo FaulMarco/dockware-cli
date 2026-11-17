@@ -43,7 +43,9 @@ dockware clone <ssh-target> --path <project root on the server> [flags]
    pattern counts run in up to 4 parallel batches.
 7. Make it run locally: domains rewritten to `localhost` / `<slug>.localhost`,
    admin user `admin` / `shopware`, staging mode, `plugin:refresh`,
-   `assets:install`, `theme:compile`, optional `post_sql`.
+   `assets:install`, `theme:compile`, optional `post_sql`. Code synced from
+   the server gets a new JWT key pair (`config/jwt` is never copied; before
+   6.7 the Admin and Store API need it).
 8. Optional headless frontend from the config, then **smoke tests**:
    storefront, Store API, Admin API login, frontend SSR.
 
@@ -206,15 +208,17 @@ volumes, so the checkout stays clean. `--no-frontend` skips it.
 
 ### Code
 
-Built-in rsync excludes (anchored paths refer to the project root):
+Built-in rsync excludes (anchored paths refer to the project root; the
+anchored directories also match symlinks, as release-based deploys link them
+into a shared directory):
 
 - secrets and state: `/.env`, `/.env.*`, `/install.lock`, `/auth.json`,
-  `/config/jwt/`
+  `/config/jwt`
 - tooling: `.git/`, `.idea/`, `.DS_Store`, `node_modules/`, `.nuxt/`, `.output/`
-- installed or generated: `/vendor/`, `/var/`, `/public/media/`,
-  `/public/thumbnail/`, `/public/sitemap/`, `/public/theme/`,
-  `/public/bundles/`, `/public/build/`
-- data and backups: `/files/`, `/uploads/`, `/import/`, `/export/`,
+- installed or generated: `/vendor`, `/var`, `/public/media`,
+  `/public/thumbnail`, `/public/sitemap`, `/public/theme`,
+  `/public/bundles`, `/public/build`
+- data and backups: `/files`, `/uploads`, `/import`, `/export`,
   `/backup*/`, `/dump*/`, `*.sql`, `*.sql.zst`, `*.gz`, `*.zip`, `*.tar`,
   `*.tar.*`, `*.tgz`, `*.bak`, `*.log`, `*.pem`, `*.key`
 - `*.csv`, `*.xlsx`, except below `/custom/` and `/src/` (plugin fixtures)

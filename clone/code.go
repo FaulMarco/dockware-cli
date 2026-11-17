@@ -17,12 +17,14 @@ import (
 // CodeExcludes keeps runtime data, secrets, build output, uploads, archives
 // and dumps off the laptop. vendor/ is installed by composer in the container
 // and media is served from the remote public URL instead. Data directories
-// are anchored to the project root so plugin code with the same name stays.
+// are anchored to the project root so plugin code with the same name stays,
+// and have no trailing "/" so that they also match symlinks: release-based
+// deploys link them into a shared directory, and such a link dangles locally.
 var CodeExcludes = []string{
-	"/.env", "/.env.*", "/install.lock", "/auth.json", "/config/jwt/",
+	"/.env", "/.env.*", "/install.lock", "/auth.json", "/config/jwt",
 	".git/", ".idea/", ".DS_Store", "node_modules/", ".nuxt/", ".output/",
-	"/vendor/", "/var/", "/files/", "/uploads/", "/import/", "/export/", "/backup*/", "/dump*/",
-	"/public/media/", "/public/thumbnail/", "/public/sitemap/", "/public/theme/", "/public/bundles/", "/public/build/",
+	"/vendor", "/var", "/files", "/uploads", "/import", "/export", "/backup*/", "/dump*/",
+	"/public/media", "/public/thumbnail", "/public/sitemap", "/public/theme", "/public/bundles", "/public/build",
 	"*.sql", "*.sql.zst", "*.gz", "*.zip", "*.tar", "*.tar.*", "*.tgz", "*.bak",
 	"*.csv", "*.xlsx", "*.log", "*.pem", "*.key",
 }

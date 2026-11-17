@@ -59,9 +59,14 @@ func (l *Local) container() string { return l.Name + "-shop" }
 func (l *Local) ShopURL() string { return "http://localhost:" + strconv.Itoa(l.Port) }
 
 // FreePort returns the first free TCP port starting at from. It probes all
-// interfaces, which is where Docker publishes ports.
-func FreePort(from int) int {
+// interfaces, which is where Docker publishes ports. Ports in own count as
+// free: a rerun recreates the project's containers, so the ports they
+// publish now are released before the new ones bind.
+func FreePort(from int, own map[int]bool) int {
 	for p := from; p < from+200; p++ {
+		if own[p] {
+			return p
+		}
 		ln, err := net.Listen("tcp", ":"+strconv.Itoa(p))
 		if err == nil {
 			ln.Close()
@@ -70,6 +75,31 @@ func FreePort(from int) int {
 	}
 	return from
 }
+
+// ProjectPorts lists the host ports published by the running containers of
+// compose project name, e.g. the stack of a previous run. Errors (no docker,
+// no containers) yield an empty set; FreePort then probes as usual.
+func ProjectPorts(ctx context.Context, name string) map[int]bool {
+	out, err := exec.CommandContext(ctx, "docker", "ps", "--filter", "label=com.docker.compose.project="+name, "--format", "{{.Ports}}").Output()
+	if err != nil {
+		return nil
+	}
+	return publishedPorts(string(out))
+}
+
+// publishedPorts parses docker's port column ("0.0.0.0:8320->80/tcp,
+// [::]:8320->80/tcp, 6379/tcp"), one container per line, into host ports.
+func publishedPorts(s string) map[int]bool {
+	ports := map[int]bool{}
+	for _, m := range publishedPortRE.FindAllStringSubmatch(s, -1) {
+		if p, err := strconv.Atoi(m[1]); err == nil {
+			ports[p] = true
+		}
+	}
+	return ports
+}
+
+var publishedPortRE = regexp.MustCompile(`:(\d+)->`)
 
 func randomHex(n int) string {
 	b := make([]byte, n)
@@ -1028,8 +1058,17 @@ func (l *Local) PostImport(ctx context.Context, p *Probe, domains map[string]str
 			return Fail(StepPostImport, "post_sql "+postSQL+" failed", err, "")
 		}
 	}
-	steps := [][]string{{"plugin:refresh"}}
 	list, _ := l.Console(ctx, "list", "system", "--raw")
+	var steps [][]string
+	// config/jwt stays on the server (CodeExcludes); before 6.7 the Admin and
+	// Store API sign with these files, so code synced by the clone needs its own
+	// pair. 6.7 signs with APP_SECRET and has no such command.
+	if l.OwnsCode && strings.Contains(list, "system:generate-jwt-secret") {
+		if _, err := os.Stat(filepath.Join(l.CodeDir, "config", "jwt", "private.pem")); os.IsNotExist(err) {
+			steps = append(steps, []string{"system:generate-jwt-secret", "-n"})
+		}
+	}
+	steps = append(steps, []string{"plugin:refresh"})
 	if strings.Contains(list, "system:setup:staging") {
 		steps = append(steps, []string{"system:setup:staging", "--force", "-n"})
 	} else if _, err := l.SQL(ctx, "DELETE FROM system_config WHERE configuration_key = 'core.mailerSettings.disableDelivery' AND sales_channel_id IS NULL;\nINSERT INTO system_config (id, configuration_key, configuration_value, created_at) VALUES (UNHEX(REPLACE(UUID(),'-','')), 'core.mailerSettings.disableDelivery', '{\"_value\": true}', NOW(3));"); err != nil {
