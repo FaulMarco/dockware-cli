@@ -53,13 +53,18 @@ type ProjectConfig struct {
 // Env values may use ${SHOP_URL}, ${SHOP_URL_INTERNAL}, ${FRONTEND_URL} and
 // ${ACCESS_KEY} / ${ACCESS_KEY:<sales channel name>}.
 type FrontendConfig struct {
+	// Path is relative to the code tree, or absolute (also ~/…) for a frontend in its own repository.
 	Path string `yaml:"path"`
+	// Workdir is the app directory inside Path for monorepos whose app imports files outside its own directory.
+	Workdir string `yaml:"workdir"`
 	// Image is the container image; empty = node:<major> from --node / node:, else detected from the version files.
-	Image   string            `yaml:"image"`
-	Install string            `yaml:"install"`
-	Command string            `yaml:"command"`
-	Port    int               `yaml:"port"`
-	Env     map[string]string `yaml:"env"`
+	Image   string `yaml:"image"`
+	Install string `yaml:"install"`
+	Command string `yaml:"command"`
+	Port    int    `yaml:"port"`
+	// BasePath is the URL path the app serves under, e.g. /shop/; the SSR check requests it.
+	BasePath string            `yaml:"base_path"`
+	Env      map[string]string `yaml:"env"`
 }
 
 var (
@@ -123,8 +128,24 @@ func LoadProjectConfig(path string) (*ProjectConfig, error) {
 		if f.Path == "" || f.Command == "" {
 			return nil, configError(path, "frontend needs path and command", "")
 		}
+		if strings.HasPrefix(f.Path, "~/") {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return nil, configError(path, "frontend.path: "+err.Error(), "")
+			}
+			f.Path = filepath.Join(home, f.Path[2:])
+		}
+		if w := filepath.ToSlash(f.Workdir); w != "" && (pathpkg.IsAbs(w) || pathpkg.Clean(w) == ".." || strings.HasPrefix(pathpkg.Clean(w), "../")) {
+			return nil, configError(path, fmt.Sprintf("frontend.workdir must be a directory inside frontend.path, got %q", f.Workdir), "")
+		}
 		if f.Port == 0 {
 			f.Port = 3000
+		}
+		if f.BasePath == "" {
+			f.BasePath = "/"
+		}
+		if !strings.HasPrefix(f.BasePath, "/") {
+			return nil, configError(path, fmt.Sprintf("frontend.base_path must start with /, got %q", f.BasePath), "")
 		}
 	}
 	return cfg, nil
@@ -141,6 +162,19 @@ func (c *ProjectConfig) PostSQLPath() string {
 		return c.PostSQL
 	}
 	return filepath.Join(c.dir, c.PostSQL)
+}
+
+// Dir is the frontend directory on the host.
+func (f *FrontendConfig) Dir(codeDir string) string {
+	if filepath.IsAbs(f.Path) {
+		return f.Path
+	}
+	return filepath.Join(codeDir, f.Path)
+}
+
+// AppDir is the directory on the host that install and command run in.
+func (f *FrontendConfig) AppDir(codeDir string) string {
+	return filepath.Join(f.Dir(codeDir), f.Workdir)
 }
 
 var kindNames = map[Kind]bool{

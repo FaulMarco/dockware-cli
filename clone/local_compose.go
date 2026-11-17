@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	pathpkg "path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -179,7 +180,7 @@ func (l *Local) Compose() ([]byte, error) {
 		shop["depends_on"] = []string{"redis"}
 	}
 	if f := l.Frontend; f != nil {
-		app := "/app"
+		app := pathpkg.Join("/app", filepath.ToSlash(f.Workdir))
 		cmd := f.Command
 		if f.Install != "" {
 			cmd = f.Install + " && " + f.Command
@@ -197,7 +198,7 @@ func (l *Local) Compose() ([]byte, error) {
 			// .output stays on the bind mount: `nuxt dev` removes that directory,
 			// which fails with EBUSY on a volume mountpoint
 			"volumes": []string{
-				filepath.Join(l.CodeDir, f.Path) + ":" + app,
+				f.Dir(l.CodeDir) + ":/app",
 				"node_modules:" + app + "/node_modules",
 				"nuxt:" + app + "/.nuxt",
 			},

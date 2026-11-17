@@ -25,7 +25,7 @@ func (l *Local) FrontendImage() string {
 	if l.NodePinned && l.NodeVersion != "" {
 		return "node:" + l.NodeVersion
 	}
-	if v := DetectNodeVersion(filepath.Join(l.CodeDir, f.Path), l.CodeDir); v != "" {
+	if v := DetectNodeVersion(f.AppDir(l.CodeDir), f.Dir(l.CodeDir), l.CodeDir); v != "" {
 		return "node:" + v
 	}
 	if l.NodeVersion != "" {

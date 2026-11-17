@@ -281,9 +281,9 @@ func Run(ctx context.Context, o Options) (err error) {
 	if err != nil {
 		return err
 	}
-	if cfg.Frontend != nil && !o.NoFrontend && o.CodeDir != "" {
-		if fi, serr := os.Stat(filepath.Join(o.CodeDir, cfg.Frontend.Path)); serr != nil || !fi.IsDir() {
-			return &Error{Step: StepConfig, Msg: fmt.Sprintf("frontend.path %s is not a directory in the checkout %s", cfg.Frontend.Path, o.CodeDir), Hint: "fix frontend.path in the config, or pass --no-frontend"}
+	if f := cfg.Frontend; f != nil && !o.NoFrontend && (o.CodeDir != "" || filepath.IsAbs(f.Path)) {
+		if fi, serr := os.Stat(f.AppDir(o.CodeDir)); serr != nil || !fi.IsDir() {
+			return &Error{Step: StepConfig, Msg: fmt.Sprintf("frontend.path/workdir %s is not a directory", f.AppDir(o.CodeDir)), Hint: "fix frontend.path or frontend.workdir in the config, or pass --no-frontend"}
 		}
 	}
 
@@ -905,7 +905,7 @@ func Run(ctx context.Context, o Options) (err error) {
 		fmt.Fprintf(log, "Access:   %-30s %s\n", name, keys[name])
 	}
 	if l.Frontend != nil {
-		fmt.Fprintf(log, "Frontend: http://localhost:%d\n", l.FrontPort)
+		fmt.Fprintf(log, "Frontend: http://localhost:%d%s\n", l.FrontPort, l.Frontend.BasePath)
 	}
 	fmt.Fprintf(log, "Compose:  docker compose -f %s ...\n", compose)
 	fmt.Fprintf(log, "Expires:  %s (dockware-cli clone purge %s)\n", audit.ExpiresAt.Format("2006-01-02"), o.Name)
@@ -1174,7 +1174,7 @@ func Smoke(ctx context.Context, l *Local, p *Probe, domains map[string]string, k
 	checks = append(checks, c)
 
 	if l.Frontend != nil {
-		u := "http://localhost:" + fmt.Sprint(l.FrontPort) + "/"
+		u := "http://localhost:" + fmt.Sprint(l.FrontPort) + l.Frontend.BasePath
 		// dev servers compile on first request
 		deadline := time.Now().Add(10 * time.Minute)
 		var last Check

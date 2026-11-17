@@ -307,11 +307,13 @@ are always dropped. The local shop uses the defaults; add sandbox keys with
 
 ```yaml
 frontend:
-  path: frontend            # directory in the code tree, mounted to /app
+  path: frontend            # directory in the code tree, mounted to /app; absolute or ~/… for a frontend in its own repository
+  workdir: apps/shop        # optional; app directory inside path for monorepos, path is then mounted whole
   image: node:22            # optional; default node:<major> from --node/node:, else the frontend dir, the code root or the server
   install: npm ci           # optional, runs before command
   command: npm run dev      # required
   port: 3000                # port in the container, published on --frontend-port
+  base_path: /              # optional; URL path the app serves under (e.g. /shop/), requested by the SSR check
   env:
     NUXT_PUBLIC_SHOPWARE_ENDPOINT: ${SHOP_URL_INTERNAL}/store-api
     NUXT_PUBLIC_SHOPWARE_ACCESS_TOKEN: ${ACCESS_KEY:Headless}
