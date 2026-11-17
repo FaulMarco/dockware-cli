@@ -1095,6 +1095,8 @@ func formatRows(m map[string]int64) string {
 }
 
 // httpClient resolves every *.localhost name to 127.0.0.1, like browsers do.
+// It follows redirects on the same host only (e.g. to a locale prefix); a
+// redirect to another host, such as the source shop, is the result.
 var httpClient = &http.Client{
 	Timeout: 60 * time.Second,
 	Transport: &http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -1104,7 +1106,12 @@ var httpClient = &http.Client{
 		}
 		return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, addr)
 	}},
-	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 || req.URL.Host != via[0].URL.Host {
+			return http.ErrUseLastResponse
+		}
+		return nil
+	},
 }
 
 func httpCheck(ctx context.Context, name, method, u string, headers map[string]string, body string, want int) (Check, []byte) {
@@ -1121,6 +1128,9 @@ func httpCheck(ctx context.Context, name, method, u string, headers map[string]s
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if final := resp.Request.URL.String(); final != u {
+		u += " → " + final
+	}
 	return Check{Name: name, OK: resp.StatusCode == want, Detail: fmt.Sprintf("%s %s → %d, %d bytes", method, u, resp.StatusCode, len(data))}, data
 }
 
