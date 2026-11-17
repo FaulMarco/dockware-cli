@@ -64,13 +64,16 @@ dockware-cli purge
 
 
 ## Clone
-Clone a running Shopware 6 shop over SSH into a local dockware environment. The database is
-anonymised on the server before it is transferred, the code is synced without secrets and
-uploads, vendor/ is installed with composer in the container and media is served from the source.
+Copy a running Shopware 6 shop over SSH into a local dockware environment. The database is
+anonymised on the server before it is transferred. The code is synced without secrets and
+uploads, vendor/ is installed with composer in the container, and media is served from the source.
+When the anonymisation check fails, the clone is removed. The shop listens on 127.0.0.1 only.
 
 ```bash
 dockware-cli clone shop-stage --path /var/www/shop --code ~/projects/shop
+dockware-cli clone list
+dockware-cli clone purge --expired
 ```
 
-See [docs/clone.md](docs/clone.md) for prerequisites, the `.dockware-clone.yml` reference and the error table.
+See [docs/clone.md](docs/clone.md) for prerequisites, all flags, the `.dockware-clone.yml` reference and the error table.
 Step-by-step guide: [docs/clone-guide.md](docs/clone-guide.md).

@@ -1,7 +1,8 @@
-# .dockware-clone.yml — put it in the project root (found with --code) or pass --config.
-# Every key is optional; unknown keys are rejected. Flags win over these values,
-# also when they switch one off (--orders-since-days 0, --skip-search-index=false,
-# --max-code-size -1).
+# .dockware-clone.yml — the clone uses the first of: --config <file>,
+# <checkout>/.dockware-clone.yml (with --code), <path>/.dockware-clone.yml on
+# the server. Every key is optional; unknown keys are rejected. Flags win over
+# these values, also when they switch one off (--orders-since-days 0,
+# --skip-search-index=false, --max-code-size -1).
 
 # Extension tables whose rows are exported (glob patterns). Everything outside the
 # Shopware core is exported schema-only unless listed here. Add only tables that
@@ -17,13 +18,33 @@ no_data:
   - product_stream_mapping
 
 # Column rewrites on top of the defaults. A rule for a column that already has
-# a default replaces it. Kinds: email, first_name, last_name, company, street,
-# zip, city, phone, ip, username, token, password, empty_json_array, null.
+# a default replaces it. Table and column must exist in the server database.
+# Kinds: email, first_name, last_name, company, street, zip, city, phone, ip,
+# username, token, password, empty_json_array, null.
 rules:
   - { table: acme_newsletter_lead, column: email, kind: email }
   - { table: acme_newsletter_lead, column: first_name, kind: first_name }
   - { table: acme_newsletter_lead, column: phone, kind: phone }
   - { table: acme_support_ticket, column: message, kind: null }
+
+# Columns that a default rule clears (kind null, or the automatic rule for all
+# custom_fields and JSON columns of customer and order tables) and that are
+# exported unchanged. One table.column per entry, no globs. Add only columns
+# without personal data.
+# keep_columns:
+#   - order.custom_fields
+#   - order_line_item.custom_fields
+
+# Columns where the anonymisation check accepts e-mail addresses (table.column
+# globs), e.g. shop or sender addresses of an extension. Without an entry, an
+# e-mail address outside example.com fails the check and the clone is removed.
+# expected_email_columns:
+#   - acme_store.email
+#   - acme_*.contact_email
+
+# Days until the clone is expired (dockware-cli clone purge --expired).
+# Default 30; --retention-days wins.
+# retention_days: 14
 
 # Overrides for the generated local environment (shop.env). Keys the clone set
 # empty because they looked like credentials are listed at the end of the run.
