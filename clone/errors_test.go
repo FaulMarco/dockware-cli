@@ -38,6 +38,7 @@ func TestFailHints(t *testing.T) {
 		{StepUpload, "sh: /tmp/dwc.x/shopware-cli: Permission denied", "noexec"},
 		{StepImport, "ERROR 2002 (HY000): Can't connect to local MySQL server through socket '/var/run/mysqld/mysqld.sock' (2)", "docker compose logs shop"},
 		{StepPostImport, "SQLSTATE[HY000] [2002] Connection refused", "docker compose logs shop"},
+		{StepPostImport, `#message: "You have requested a non-existent service "BabyoneTheme\Decorator\WishlistCustomerController"."`, "check out the commit the server runs"},
 		{StepVerify, "local mysql: exit status 1: ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1' (111)", "docker compose logs shop"},
 		{StepImport, "ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: YES)", "stock dockware image"},
 		{StepImport, "ERROR 1064 (42000) at line 12: You have an error in your SQL syntax", "dump does not import"},

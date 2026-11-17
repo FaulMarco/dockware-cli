@@ -337,7 +337,8 @@ func (l *Local) PostImport(ctx context.Context, p *Probe, domains map[string]str
 					out = retried
 				}
 			}
-			return Fail(StepPostImport, "bin/console "+strings.Join(s, " ")+" failed", err, tailLines(out, 25))
+			return &Error{Step: StepPostImport, Msg: "bin/console " + strings.Join(s, " ") + " failed",
+				Hint: hintForErr(StepPostImport, err, out), Output: headTailLines(out, 12, 12), Err: err}
 		}
 	}
 	return nil

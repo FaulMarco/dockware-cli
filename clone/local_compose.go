@@ -301,6 +301,15 @@ func tailLines(s string, n int) string {
 	return strings.Join(lines, "\n")
 }
 
+// headTailLines keeps both ends: a Symfony exception dump puts the message first and the trace after it.
+func headTailLines(s string, head, tail int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) <= head+tail {
+		return strings.Join(lines, "\n")
+	}
+	return strings.Join(lines[:head], "\n") + "\n…\n" + strings.Join(lines[len(lines)-tail:], "\n")
+}
+
 // Up starts the shop container, waits for MySQL and Apache and checks that
 // the image runs the PHP version the shop needs. A container that exits
 // while starting (entrypoint failure) is reported at once with its logs.

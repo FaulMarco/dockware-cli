@@ -129,6 +129,8 @@ var hints = []hint{
 		"the local database in the shop container is not up: docker compose logs shop"},
 	{localDBSteps, regexp.MustCompile(`(?i)Access denied for user|ERROR 1045`),
 		"the local MySQL in the shop container rejected root/root: the image is not a stock dockware image, check --image"},
+	{[]string{StepPostImport}, regexp.MustCompile(`ClassNotFoundError|ServiceNotFoundException|non-existent service|Attempted to load class`),
+		"the code does not match the database: with --code, check out the commit the server runs (its release directory or deploy tag); without --code the code is synced from the server"},
 	{remoteDiskSteps, regexp.MustCompile(`(?i)No space left on device|Disk quota exceeded|ERROR 1114`),
 		"a disk is full on the server: free space in /tmp there or ask the hoster about the quota"},
 	{[]string{StepDump}, regexp.MustCompile(`(?i)No space left on device|Disk quota exceeded|ERROR 1114`),
