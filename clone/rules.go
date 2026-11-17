@@ -321,6 +321,8 @@ func NoDataTables() []string {
 		// gaps: sessions, recovery tokens, generated documents, import files
 		"sales_channel_api_context", "user_recovery", "document", "import_export_file",
 		"app_flow_event", "flow_execution", "scheduled_task_execution",
+		// admin UI preferences (grid filters, search history)
+		"user_config",
 		// logs of any extension
 		"*_log", "*_logs", "*_log_entry",
 	}

@@ -222,7 +222,7 @@ example.
 | Key | Type | Meaning |
 |---|---|---|
 | `allow_tables` | list of globs | Extension tables whose rows are exported. All tables outside the Shopware core are exported without rows unless listed here. Built in: `swag_cms_extensions_*`, `swag_language_pack_*`, `swag_customized_products_template*`, `swag_social_shopping_sales_channel`. |
-| `no_data` | list of globs | More tables to export without rows, also core tables. Built in: cart, queues, logs, sessions, tokens, documents, import/export files, `*_log`, `*_logs`, `*_log_entry`. |
+| `no_data` | list of globs | More tables to export without rows, also core tables. Built in: cart, queues, logs, sessions, tokens, documents, import/export files, admin UI settings (`user_config`), `*_log`, `*_logs`, `*_log_entry`. |
 | `rules` | list of `{table, column, kind}` | Column rewrites on top of the defaults. A project rule for a column that has a default rule replaces it. A rule for a table or column that the server database does not have is an error. |
 | `keep_columns` | list of `table.column` | Columns that a default rule clears (kind `null`, or an automatic `custom_fields` / JSON rule) and that you want to export unchanged. No globs. An entry for a column with another rule kind (e.g. `customer.email`) is an error; use `rules:` to change such a rule. |
 | `expected_email_columns` | list of `table.column` globs | Columns where the verification accepts e-mail addresses, e.g. `acme_store.email` or `acme_*.contact_email`. |
@@ -339,8 +339,10 @@ shop is prepared, the clone runs these checks on the local database:
 - no e-mail addresses outside `example.com` in any exported text column,
   except in expected columns. Built-in expected columns:
   `system_config.configuration_value`, `mail_template*.*`,
-  `mail_header_footer*.*`, `sales_channel*.*`, `cms_*.*`, `product*.*`,
-  `snippet.*`, `app*.*`. They never apply to the customer and order tables;
+  `mail_header_footer*.*`, `sales_channel*.*`, `cms_*.*`,
+  `category_translation.slot_config`, `landing_page_translation.slot_config`,
+  `product*.*`, `snippet.*`, `app*.*`, `flow_sequence.config` (recipients of
+  flow mails). They never apply to the customer and order tables;
   there only `expected_email_columns` counts.
 
 When a check fails, the clone **fails closed**: it removes the containers,

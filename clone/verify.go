@@ -247,7 +247,8 @@ func Verify(ctx context.Context, r Remote, l *Local, p *Probe, c Classification,
 // builtinEmailColumns hold shop, sender and content addresses, not customer data.
 var builtinEmailColumns = []string{
 	"system_config.configuration_value", "mail_template*.*", "mail_header_footer*.*", "sales_channel*.*",
-	"cms_*.*", "product*.*", "snippet.*", "app*.*",
+	"cms_*.*", "category_translation.slot_config", "landing_page_translation.slot_config",
+	"product*.*", "snippet.*", "app*.*", "flow_sequence.config",
 }
 
 // emailExpected reports whether e-mail addresses in column ("table.column")
