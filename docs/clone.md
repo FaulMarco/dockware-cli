@@ -73,8 +73,10 @@ mapping, the Store API access keys, the compose command and the expiry date.
 Local runtime settings: `APP_DEBUG=0` (`1` with `--app-env dev`) instead of
 the value of the server, because the debug container checks every file on the
 bind mount again. A `php-clone.ini` (fpm and cli) sets opcache to 512 MB /
-100000 files with `revalidate_freq=2`, so code changes are visible within 2 s.
-You can change both with `env:` or in `<out>/php-clone.ini`.
+100000 files with `revalidate_freq=2`, so code changes are visible within 2 s,
+and hides deprecation notices (`error_reporting` as in `php.ini-production`),
+so they do not end up in HTML and JSON responses. You can change both with
+`env:` or in `<out>/php-clone.ini`.
 
 These items do not leave the server:
 

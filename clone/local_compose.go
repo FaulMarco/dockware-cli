@@ -21,13 +21,16 @@ import (
 // phpCloneINI raises the image's OPcache limits for a shop checkout: its
 // 10000 accelerated files are below the ~23k vendor files plus the
 // container cache, revalidate_freq 2 keeps code edits visible within 2 s,
-// and the realpath cache spares stat calls on the bind mount.
+// and the realpath cache spares stat calls on the bind mount. The image
+// shows E_ALL; deprecations from code written for an older PHP would end up
+// in HTML and JSON responses, so they are reported like php.ini-production.
 const phpCloneINI = `opcache.memory_consumption=512
 opcache.interned_strings_buffer=64
 opcache.max_accelerated_files=100000
 opcache.revalidate_freq=2
 realpath_cache_size=4096K
 realpath_cache_ttl=600
+error_reporting=E_ALL & ~E_DEPRECATED & ~E_STRICT
 `
 
 // WriteFiles writes compose file, env files, Apache env include and php ini.
