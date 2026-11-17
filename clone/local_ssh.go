@@ -103,36 +103,37 @@ const localMySQLAdmin = "MYSQL_PWD=root mysqladmin -h127.0.0.1 -uroot"
 // is shut down cleanly first; its data and the SET PERSIST tuning live in the
 // db volume and survive. What the old container kept in its own filesystem,
 // the PHP extensions EnsurePHPExtensions added and an nvm-installed node, is
-// installed again.
-func (l *Local) DropSSHAgent(ctx context.Context, log io.Writer) error {
+// installed again; the extensions still missing afterwards are returned.
+func (l *Local) DropSSHAgent(ctx context.Context, log io.Writer) ([]string, error) {
 	if !l.SSHAgent {
-		return nil
+		return nil, nil
 	}
 	l.SSHAgent = false
 	if err := l.WriteFiles(); err != nil {
-		return err
+		return nil, err
 	}
 	if hostSSHAgent() == "" {
 		// the compose file never mounted an agent: nothing to recreate
-		return nil
+		return nil, nil
 	}
 	fmt.Fprintf(log, "  ssh-agent: recreating %s without the agent\n", l.container())
 	if out, err := l.execRoot(ctx, stopMySQLScript); err != nil {
 		fmt.Fprintf(log, "  ssh-agent: stopping MySQL cleanly failed, InnoDB recovers on start: %s\n", tailLines(out, 1))
 	}
 	if err := l.compose(ctx, StepDocker, "up", "-d", "--no-deps", "--force-recreate", "shop"); err != nil {
-		return err
+		return nil, err
 	}
 	if err := l.started(ctx); err != nil {
-		return err
+		return nil, err
 	}
-	if _, err := l.EnsurePHPExtensions(ctx, l.phpExts, log); err != nil {
-		return err
+	missing, err := l.EnsurePHPExtensions(ctx, l.phpExts, log)
+	if err != nil {
+		return nil, err
 	}
 	if l.NodeVersion != "" {
 		if _, err := l.UseNode(ctx, log); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return missing, nil
 }

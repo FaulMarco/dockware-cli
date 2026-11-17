@@ -190,8 +190,21 @@ true`)
 	if len(install) == 0 {
 		return exts, nil
 	}
-	if out, err = l.execRoot(ctx, "export DEBIAN_FRONTEND=noninteractive\napt-get install -y -qq "+strings.Join(install, " ")+" 2>&1 || exit 1\nservice php"+ver+"-fpm restart >/dev/null 2>&1 || true"); err != nil {
-		fmt.Fprintf(log, "  php extensions: apt-get install %s failed:\n    %s\n", strings.Join(install, " "), strings.ReplaceAll(tailLines(out, 10), "\n", "\n    "))
+	quoted := make([]string, len(install))
+	for i, p := range install {
+		quoted[i] = ShellQuote(p)
+	}
+	pkgList := strings.Join(quoted, " ")
+	// one package the mirror cannot serve (ppa 503s) fails a batch install;
+	// the fallback installs the others one by one
+	if out, err = l.execRoot(ctx, `export DEBIAN_FRONTEND=noninteractive
+if ! apt-get install -y -qq `+pkgList+` 2>&1; then
+  apt-get update -qq >/dev/null 2>&1
+  for p in `+pkgList+`; do apt-get install -y -qq "$p" >/dev/null 2>&1 || { echo "failed: $p"; failed=1; }; done
+fi
+service php`+ver+`-fpm restart >/dev/null 2>&1 || true
+[ -z "$failed" ]`); err != nil {
+		fmt.Fprintf(log, "  php extensions: apt-get install failed:\n    %s\n", strings.ReplaceAll(tailLines(out, 10), "\n", "\n    "))
 	}
 	// what php reports now decides, not apt's exit status (partial installs)
 	if have, err = l.phpModules(ctx); err != nil {

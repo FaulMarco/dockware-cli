@@ -651,7 +651,7 @@ func Run(ctx context.Context, o Options) (err error) {
 		defer cancel()
 		var derr error
 		if upDone {
-			derr = l.DropSSHAgent(dctx, log)
+			_, derr = l.DropSSHAgent(dctx, log)
 		} else {
 			// a stack that did not come up is not started again: the compose
 			// file loses the agent and a created shop container is stopped
@@ -814,8 +814,14 @@ func Run(ctx context.Context, o Options) (err error) {
 	}
 	if l.SSHAgent {
 		step = StepDocker
-		if err := l.DropSSHAgent(ctx, log); err != nil {
+		lost, err := l.DropSSHAgent(ctx, log)
+		if err != nil {
 			return err
+		}
+		for _, ext := range lost {
+			if !containsString(missing, ext) {
+				warn("php extension %s is gone after recreating %s without the ssh-agent and apt could not install it again: run the clone again, code paths using it will fail", ext, l.container())
+			}
 		}
 	}
 

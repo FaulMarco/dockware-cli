@@ -481,8 +481,11 @@ shopware-cli. It creates staging tables on the server.
   (`php -m`) and the container does not have from the apt sources of the
   image (`php<ver>-<ext>`, e.g. `php8.3-imagick`) and restarts php-fpm before
   composer runs. Profilers and debuggers (tideways, xdebug, pcov, blackfire,
-  newrelic, opcache, ddtrace, excimer) are skipped. An extension without a
-  package stays missing with a warning.
+  newrelic, opcache, ddtrace, excimer) are skipped. When the batch install
+  fails (e.g. the PPA answers 503 for one package), the packages are installed
+  one by one. An extension without a package or with a failed install stays
+  missing with a warning, also when the shop container is recreated without
+  the ssh-agent and the second install fails.
 - **Node** for the shop container: `--node`, else `node:` in the config, else
   the first of `.nvmrc`, `.node-version`, `package.json` (`volta.node`,
   `engines.node`) in the code root, else `node -v` on the server. A missing
