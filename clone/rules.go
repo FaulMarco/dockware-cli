@@ -32,6 +32,9 @@ const (
 	KindEmptyJSON Kind = "empty_json_array"
 	// KindNull clears the value: NULL for nullable columns, '' or '{}' otherwise.
 	KindNull Kind = "null"
+	// KindJSONEmail replaces an address in the "email" key of a JSON column;
+	// "*@domain" wildcards stay. Built in only.
+	KindJSONEmail Kind = "json_email"
 )
 
 // KnownPasswordHash is the bcrypt hash of "shopware". Admin users, customers and
@@ -135,6 +138,10 @@ func DefaultRules() []Rule {
 	add("product_review", KindFirstName, "external_user")
 	add("product_review", KindNull, "comment", "custom_fields")
 	add("promotion_individual_code", KindNull, "payload")
+	// customerEmail conditions can name single customers; Shopware rebuilds the
+	// serialised rule.payload, which repeats the conditions, from rule_condition
+	add("rule_condition", KindJSONEmail, "value")
+	add("rule", KindNull, "payload")
 	// Shopware stores the data of the last sent mail (order, customer) here
 	add("mail_template_type", KindNull, "template_data")
 
@@ -143,7 +150,7 @@ func DefaultRules() []Rule {
 	add("user", KindFirstName, "first_name")
 	add("user", KindLastName, "last_name")
 	add("user", KindPassword, "password")
-	add("user", KindNull, "store_token", "custom_fields")
+	add("user", KindNull, "title", "store_token", "custom_fields")
 	add("user_access_key", KindPassword, "secret_access_key")
 	add("integration", KindPassword, "secret_access_key")
 	add("app", KindToken, "app_secret")
@@ -321,8 +328,8 @@ func NoDataTables() []string {
 		// gaps: sessions, recovery tokens, generated documents, import files
 		"sales_channel_api_context", "user_recovery", "document", "import_export_file",
 		"app_flow_event", "flow_execution", "scheduled_task_execution",
-		// admin UI preferences (grid filters, search history)
-		"user_config",
+		// admin UI preferences (grid filters, search history), consent decisions of admins
+		"user_config", "consent_state",
 		// logs of any extension
 		"*_log", "*_logs", "*_log_entry",
 	}
@@ -452,10 +459,11 @@ func Expression(r Rule, schema Schema) string {
 		crc = "CRC32(UUID())"
 	}
 
+	email := "CONCAT('" + strings.ReplaceAll(r.Table, "_", "-") + "-', " + hexID + ", '@" + PlaceholderEmailDomain + "')"
 	var expr string
 	switch r.Kind {
 	case KindEmail:
-		expr = "CONCAT('" + strings.ReplaceAll(r.Table, "_", "-") + "-', " + hexID + ", '@" + PlaceholderEmailDomain + "')"
+		expr = email
 	case KindFirstName:
 		expr = elt(crc, firstNames)
 	case KindLastName:
@@ -484,6 +492,9 @@ func Expression(r Rule, schema Schema) string {
 		expr = "'[]'"
 	case KindNull:
 		return nullExpression(col)
+	case KindJSONEmail:
+		v := "JSON_UNQUOTE(JSON_EXTRACT(" + q + ", '$.email'))"
+		return "IF(" + v + " LIKE '%@%' AND " + v + " NOT LIKE '*@%', JSON_SET(" + q + ", '$.email', " + email + "), " + q + ")"
 	default:
 		panic("unknown anonymisation kind " + string(r.Kind))
 	}

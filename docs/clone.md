@@ -50,8 +50,9 @@ Step-by-step guide: [`clone-guide.md`](clone-guide.md).
 7. **Prepare the shop**: domains are changed to `localhost` /
    `<slug>.localhost`, admin user `admin` / `shopware`, staging mode,
    `plugin:refresh`, `assets:install`, `theme:compile`, optional `post_sql`.
-   Code synced from the server gets a new JWT key pair (`config/jwt` is never
-   copied).
+   Before 6.7 a missing `config/jwt/private.pem` is generated
+   (`system:generate-jwt-secret`): in the synced code, which never gets the
+   server's pair, and in a `--code` checkout, where `config/jwt` is gitignored.
 8. Optional headless frontend from the config, then **smoke tests**:
    storefront, Store API, Admin API login, frontend SSR.
 
@@ -222,7 +223,7 @@ example.
 | Key | Type | Meaning |
 |---|---|---|
 | `allow_tables` | list of globs | Extension tables whose rows are exported. All tables outside the Shopware core are exported without rows unless listed here. Built in: `swag_cms_extensions_*`, `swag_language_pack_*`, `swag_customized_products_template*`, `swag_social_shopping_sales_channel`. |
-| `no_data` | list of globs | More tables to export without rows, also core tables. Built in: cart, queues, logs, sessions, tokens, documents, import/export files, admin UI settings (`user_config`), `*_log`, `*_logs`, `*_log_entry`. |
+| `no_data` | list of globs | More tables to export without rows, also core tables. Built in: cart, queues, logs, sessions, tokens, documents, import/export files, admin UI settings (`user_config`), consent decisions of admin users (`consent_state`), `*_log`, `*_logs`, `*_log_entry`. |
 | `rules` | list of `{table, column, kind}` | Column rewrites on top of the defaults. A project rule for a column that has a default rule replaces it. A rule for a table or column that the server database does not have is an error. |
 | `keep_columns` | list of `table.column` | Columns that a default rule clears (kind `null`, or an automatic `custom_fields` / JSON rule) and that you want to export unchanged. No globs. An entry for a column with another rule kind (e.g. `customer.email`) is an error; use `rules:` to change such a rule. |
 | `expected_email_columns` | list of `table.column` globs | Columns where the verification accepts e-mail addresses, e.g. `acme_store.email` or `acme_*.contact_email`. |
@@ -260,8 +261,11 @@ Default rules:
 - names, e-mail, company, addresses, phone, IP addresses, birthdays, VAT ids,
   titles, comments and hashes of customers, customer addresses, order
   customers, order addresses and newsletter recipients;
-- customer passwords, admin users, user access keys, integration secrets, app
-  secrets;
+- customer passwords, admin users (including their titles), user access keys,
+  integration secrets, app secrets;
+- addresses in `customerEmail` rule conditions (`rule_condition.value`;
+  `*@domain` wildcards stay) and the serialised `rule.payload`, which Shopware
+  rebuilds from the conditions;
 - product review authors, e-mail addresses and comments;
 - order comments and deep link codes, delivery tracking codes, transaction
   validation data, capture and refund references and reasons;
@@ -305,8 +309,17 @@ Placeholders in `env`: `${SHOP_URL}` (browser URL of the shop),
 `${SHOP_URL_INTERNAL}` (`http://shop`, for server-side requests in the
 compose network), `${FRONTEND_URL}` (`http://localhost:<frontend-port>`),
 `${ACCESS_KEY}` (first storefront or headless sales channel) and
-`${ACCESS_KEY:<sales channel name>}`. `node_modules` and `.nuxt` are in
+`${ACCESS_KEY:<sales channel name or id>}` (name in the channel's language,
+else in the system language, else any). `node_modules` and `.nuxt` are in
 volumes, so the checkout stays clean. `--no-frontend` skips the frontend.
+
+Frontends often call the browser URLs (`${SHOP_URL}`, `${FRONTEND_URL}`) also
+while rendering on the server. In the container `localhost` is the container
+itself, so the clone starts a small node TCP forwarder there: the shop port
+goes to `shop:80`, the frontend port to the dev server. Images without `node`
+print a warning and skip it. The browser calls the Store API from another
+origin than the shop, so Apache answers CORS preflights with the request
+headers asked for (Shopware itself allows e.g. no `sw-currency-id`).
 
 ## Database source
 
@@ -337,12 +350,15 @@ shop is prepared, the clone runs these checks on the local database:
 - no credentials in `system_config` keys or values, checked with SQL and
   again in Go with the same patterns;
 - no e-mail addresses outside `example.com` in any exported text column,
-  except in expected columns. Built-in expected columns:
+  except in expected columns; image file names such as `logo@2x.png` do not
+  count. Built-in expected columns:
   `system_config.configuration_value`, `mail_template*.*`,
   `mail_header_footer*.*`, `sales_channel*.*`, `cms_*.*`,
-  `category_translation.slot_config`, `landing_page_translation.slot_config`,
-  `product*.*`, `snippet.*`, `app*.*`, `flow_sequence.config` (recipients of
-  flow mails). They never apply to the customer and order tables;
+  `swag_cms_extensions_*.*` (form recipients and placeholders),
+  `category_translation.slot_config`, `category_translation.description`,
+  `landing_page_translation.slot_config`, `product*.*`, `snippet.*`, `app*.*`,
+  `flow_sequence.config` and `event_action.config` (recipients of flow and
+  business event mails). They never apply to the customer and order tables;
   there only `expected_email_columns` counts.
 
 When a check fails, the clone **fails closed**: it removes the containers,

@@ -59,6 +59,9 @@ func localPattern(r Rule, q string) string {
 		return q + " = '[]'"
 	case KindNull:
 		return q + " IN ('', '{}')"
+	case KindJSONEmail:
+		v := "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(" + q + ", '$.email')), '')"
+		return "(" + v + " NOT LIKE '%@%' OR " + v + " LIKE '*@%' OR " + v + " REGEXP '^[a-z0-9-]+-[0-9a-f]{32}@example[.]com$')"
 	}
 	return "0"
 }
@@ -205,8 +208,10 @@ func Verify(ctx context.Context, r Remote, l *Local, p *Probe, c Classification,
 	}
 
 	// 6. e-mail addresses outside the placeholder domain in any exported text
-	// column: expected only in configuration and content columns
+	// column: expected only in configuration and content columns. Image file
+	// names such as logo@2x.png match the address shape and are skipped.
 	domain := strings.ReplaceAll(PlaceholderEmailDomain, ".", "[.]")
+	image := "[A-Za-z0-9-]+[.](png|jpe?g|gif|webp|avif|svg)([^A-Za-z0-9.-]|$)"
 	var scan []string
 	for _, t := range sortedTables(exported) {
 		cols := p.Schema[t]
@@ -218,7 +223,7 @@ func Verify(ctx context.Context, r Remote, l *Local, p *Probe, c Classification,
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			scan = append(scan, fmt.Sprintf("SELECT '%s.%s', COUNT(*) FROM `%s` WHERE `%s` LIKE '%%@%%' AND `%s` REGEXP '[A-Za-z0-9._%%+-]+@(?!%s([^A-Za-z0-9.-]|$))[A-Za-z0-9-]+[.][A-Za-z.]{2,}'", t, name, t, name, name, domain))
+			scan = append(scan, fmt.Sprintf("SELECT '%s.%s', COUNT(*) FROM `%s` WHERE `%s` LIKE '%%@%%' AND `%s` REGEXP '[A-Za-z0-9._%%+-]+@(?!%s([^A-Za-z0-9.-]|$))(?!%s)[A-Za-z0-9-]+[.][A-Za-z.]{2,}'", t, name, t, name, name, domain, image))
 		}
 	}
 	found, err := countRows(ctx, l, scan)
@@ -247,8 +252,8 @@ func Verify(ctx context.Context, r Remote, l *Local, p *Probe, c Classification,
 // builtinEmailColumns hold shop, sender and content addresses, not customer data.
 var builtinEmailColumns = []string{
 	"system_config.configuration_value", "mail_template*.*", "mail_header_footer*.*", "sales_channel*.*",
-	"cms_*.*", "category_translation.slot_config", "landing_page_translation.slot_config",
-	"product*.*", "snippet.*", "app*.*", "flow_sequence.config",
+	"cms_*.*", "swag_cms_extensions_*.*", "category_translation.slot_config", "category_translation.description", "landing_page_translation.slot_config",
+	"product*.*", "snippet.*", "app*.*", "flow_sequence.config", "event_action.config",
 }
 
 // emailExpected reports whether e-mail addresses in column ("table.column")

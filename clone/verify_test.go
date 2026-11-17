@@ -44,9 +44,13 @@ func TestEmailExpected(t *testing.T) {
 		{"sales_channel_domain.url", true},
 		{"cms_slot_translation.config", true},
 		{"category_translation.slot_config", true},
-		{"category_translation.description", false},
+		{"category_translation.description", true},
+		{"category_translation.custom_fields", false},
 		{"landing_page_translation.slot_config", true},
 		{"flow_sequence.config", true},
+		{"event_action.config", true},
+		{"event_action.custom_fields", false},
+		{"swag_cms_extensions_form_translation.receivers", true},
 		{"user_config.value", false},
 		{"product_translation.description", true},
 		{"snippet.value", true},
@@ -59,10 +63,21 @@ func TestEmailExpected(t *testing.T) {
 		{"product_review.content", false},
 		{"newsletter_recipient.email", false},
 		{"user.email", false},
+		{"user.title", false},
+		{"rule_condition.value", false},
 	}
 	for _, c := range cases {
 		if got := emailExpected(c.column, extra); got != c.want {
 			t.Errorf("emailExpected(%q) = %v, want %v", c.column, got, c.want)
+		}
+	}
+}
+
+// A kind without a verify pattern fails the shape check on every clone.
+func TestEveryDefaultRuleHasVerifyPattern(t *testing.T) {
+	for _, r := range DefaultRules() {
+		if localPattern(r, "`c`") == "0" {
+			t.Errorf("%s.%s: no verify pattern for kind %q", r.Table, r.Column, r.Kind)
 		}
 	}
 }
