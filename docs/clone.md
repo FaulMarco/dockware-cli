@@ -478,14 +478,19 @@ shopware-cli. It creates staging tables on the server.
 - **PHP**: `major.minor` of the server; change it with `--php` or `php:`. The
   dockware image changes PHP at start (`PHP_VERSION`).
 - **PHP extensions**: the clone installs each extension that the server has
-  (`php -m`) and the container does not have from the apt sources of the
-  image (`php<ver>-<ext>`, e.g. `php8.3-imagick`) and restarts php-fpm before
-  composer runs. Profilers and debuggers (tideways, xdebug, pcov, blackfire,
-  newrelic, opcache, ddtrace, excimer) are skipped. When the batch install
-  fails (e.g. the PPA answers 503 for one package), the packages are installed
-  one by one. An extension without a package or with a failed install stays
-  missing with a warning, also when the shop container is recreated without
-  the ssh-agent and the second install fails.
+  (`php -m`) and the image does not have from the apt sources of the image
+  (`php<ver>-<ext>`, e.g. `php8.3-imagick`). Profilers and debuggers
+  (tideways, xdebug, pcov, blackfire, newrelic, opcache, ddtrace, excimer)
+  are skipped. The packages go into a local image
+  `dockware-clone-shop:<hash>` (base image, PHP version and package list),
+  built once and reused by every later clone and by the container recreated
+  without the ssh-agent. When that build fails, the clone installs the
+  packages in the running container instead; when that batch install fails
+  (e.g. the PPA answers 503 for one package), one by one. An extension without
+  a package or with a failed install stays missing with a warning. Remove the
+  images with
+  `docker image rm $(docker images -q --filter label=dockware.clone.php-image)`;
+  `clone purge` keeps them, other clones use them.
 - **Node** for the shop container: `--node`, else `node:` in the config, else
   the first of `.nvmrc`, `.node-version`, `package.json` (`volta.node`,
   `engines.node`) in the code root, else `node -v` on the server. A missing
@@ -494,12 +499,13 @@ shopware-cli. It creates staging tables on the server.
   `node:`, else detected from the frontend directory, the code root or the
   server, else `node:lts`.
 
-The node version and the added PHP extensions are in the shop container, not
-in a volume. They stay after `docker compose stop` / `start`. After
-`docker compose down` and `up` the image default node is active again and the
-extensions are gone. Run the clone again, or install them manually:
-`docker compose -f <out>/docker-compose.yml exec shop bash -lc 'nvm install <major> && nvm alias default <major>'`
-and `docker compose -f <out>/docker-compose.yml exec -u root shop bash -c 'apt-get update && apt-get install -y php8.3-<ext> && service php8.3-fpm restart'`.
+The node version is in the shop container, not in a volume. It stays after
+`docker compose stop` / `start`. After `docker compose down` and `up` the
+image default node is active again. Run the clone again, or install it
+manually:
+`docker compose -f <out>/docker-compose.yml exec shop bash -lc 'nvm install <major> && nvm alias default <major>'`.
+Extensions that came from the image stay; extensions installed in the
+container after a failed image build are gone and need the clone again.
 
 The clone prints the result and the source of each value, e.g.
 `PHP 8.3 (server), Node 22 (checkout)`.

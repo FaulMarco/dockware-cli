@@ -54,6 +54,9 @@ type Local struct {
 	// phpExts is the extension list EnsurePHPExtensions was asked for; a
 	// recreated container (DropSSHAgent) needs it installed again.
 	phpExts []string
+	// phpNoPackage are the packages PrepareImage found without an apt
+	// candidate; EnsurePHPExtensions does not look them up again.
+	phpNoPackage map[string]bool
 }
 
 func (l *Local) warn(msg string) {

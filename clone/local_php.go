@@ -151,9 +151,23 @@ func (l *Local) EnsurePHPExtensions(ctx context.Context, want []string, log io.W
 			return nil, err
 		}
 	}
-	pkgs := phpExtPackages(ver, want, have)
+	var noPackage []string
+	var kept []phpPackage
+	for _, p := range phpExtPackages(ver, want, have) {
+		if l.phpNoPackage[p.Name] {
+			noPackage = append(noPackage, p.Exts...)
+		} else {
+			kept = append(kept, p)
+		}
+	}
+	pkgs := kept
+	withNoPackage := func(m []string) []string {
+		m = append(append([]string(nil), m...), noPackage...)
+		sort.Strings(m)
+		return m
+	}
 	if len(pkgs) == 0 {
-		return nil, nil
+		return withNoPackage(nil), nil
 	}
 	names := make([]string, len(pkgs))
 	var exts []string
@@ -170,25 +184,25 @@ for p in `+strings.Join(names, " ")+`; do apt-cache policy "$p" 2>/dev/null | gr
 true`)
 	if err != nil {
 		fmt.Fprintf(log, "  php extensions: apt-get update failed, %s stay missing:\n    %s\n", strings.Join(exts, ", "), strings.ReplaceAll(tailLines(out, 10), "\n", "\n    "))
-		return exts, nil
+		return withNoPackage(exts), nil
 	}
 	candidate := map[string]bool{}
 	for _, p := range strings.Fields(out) {
 		candidate[p] = true
 	}
-	var install, noPackage []string
+	var install, unavailable []string
 	for _, p := range pkgs {
 		if candidate[p.Name] {
 			install = append(install, p.Name)
 		} else {
-			noPackage = append(noPackage, p.Name)
+			unavailable = append(unavailable, p.Name)
 		}
 	}
-	if len(noPackage) > 0 {
-		fmt.Fprintf(log, "  php extensions: no apt package %s\n", strings.Join(noPackage, ", "))
+	if len(unavailable) > 0 {
+		fmt.Fprintf(log, "  php extensions: no apt package %s\n", strings.Join(unavailable, ", "))
 	}
 	if len(install) == 0 {
-		return exts, nil
+		return withNoPackage(exts), nil
 	}
 	quoted := make([]string, len(install))
 	for i, p := range install {
@@ -214,7 +228,7 @@ service php`+ver+`-fpm restart >/dev/null 2>&1 || true
 	for _, p := range phpExtPackages(ver, exts, have) {
 		missing = append(missing, p.Exts...)
 	}
-	sort.Strings(missing)
+	missing = withNoPackage(missing)
 	var installed []string
 	for _, e := range exts {
 		if !containsString(missing, e) {

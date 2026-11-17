@@ -646,6 +646,9 @@ func Run(ctx context.Context, o Options) (err error) {
 			return localFail(err)
 		}
 	}
+	t = time.Now()
+	l.PrepareImage(localCtx, p.PHPExtensions, log)
+	phase("php-image", t)
 	if err := l.WriteFiles(); err != nil {
 		return localFail(err)
 	}
