@@ -171,7 +171,8 @@ func (l *Local) Compose() ([]byte, error) {
 		volumeNames = append(volumeNames, "var")
 	}
 	if l.Redis {
-		services["redis"] = map[string]any{"image": "redis:7-alpine", "container_name": l.Name + "-redis"}
+		// tmpfs: the image's VOLUME /data would leave an anonymous volume behind every removed container
+		services["redis"] = map[string]any{"image": "redis:7-alpine", "container_name": l.Name + "-redis", "tmpfs": []string{"/data"}}
 		shop["depends_on"] = []string{"redis"}
 	}
 	if f := l.Frontend; f != nil {
