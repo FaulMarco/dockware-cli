@@ -34,9 +34,11 @@ func (l *Local) FrontendImage() string {
 	return "node:lts"
 }
 
-// AccessKeys lists sales channel access keys from the local (cloned) database.
+// AccessKeys lists sales channel access keys from the local (cloned)
+// database by name: the translation in the channel's language, else the one
+// in the system language, else any; every channel is also found by its hex id.
 func (l *Local) AccessKeys(ctx context.Context) (map[string]string, []string, error) {
-	out, err := l.SQL(ctx, "SELECT IFNULL(t.name, LOWER(HEX(sc.id))), sc.access_key, LOWER(HEX(sc.type_id)) FROM sales_channel sc LEFT JOIN sales_channel_translation t ON t.sales_channel_id = sc.id AND t.language_id = sc.language_id WHERE sc.active = 1 ORDER BY sc.created_at")
+	out, err := l.SQL(ctx, "SELECT COALESCE(t.name, (SELECT t2.name FROM sales_channel_translation t2 WHERE t2.sales_channel_id = sc.id AND t2.name IS NOT NULL ORDER BY t2.language_id = UNHEX('2FBB5FE2E29A4D70AA5854CE7CE3E20B') DESC, t2.language_id LIMIT 1), LOWER(HEX(sc.id))), sc.access_key, LOWER(HEX(sc.type_id)), LOWER(HEX(sc.id)) FROM sales_channel sc LEFT JOIN sales_channel_translation t ON t.sales_channel_id = sc.id AND t.language_id = sc.language_id WHERE sc.active = 1 ORDER BY sc.created_at")
 	if err != nil {
 		return nil, nil, Fail(StepPostImport, "reading the sales channel access keys failed", err, "")
 	}
@@ -44,7 +46,7 @@ func (l *Local) AccessKeys(ctx context.Context) (map[string]string, []string, er
 	var order []string
 	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
 		f := strings.Split(l, "\t")
-		if len(f) < 3 || (f[2] != SalesChannelTypeStorefront && f[2] != SalesChannelTypeAPI) {
+		if len(f) < 4 || (f[2] != SalesChannelTypeStorefront && f[2] != SalesChannelTypeAPI) {
 			continue
 		}
 		name := f[0]
@@ -52,6 +54,7 @@ func (l *Local) AccessKeys(ctx context.Context) (map[string]string, []string, er
 			name = fmt.Sprintf("%s #%d", f[0], len(order)+1)
 		}
 		keys[name] = f[1]
+		keys[f[3]] = f[1]
 		order = append(order, name)
 	}
 	return keys, order, nil
