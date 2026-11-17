@@ -15,8 +15,17 @@ type Audit struct {
 	Host               string                   `json:"host"`
 	Started            time.Time                `json:"started"`
 	Finished           time.Time                `json:"finished"`
+	Name               string                   `json:"name"`
+	OutDir             string                   `json:"out_dir"`
 	Target             string                   `json:"target"`
 	Root               string                   `json:"root"`
+	ResolvedHost       string                   `json:"resolved_host,omitempty"`
+	Database           string                   `json:"database,omitempty"`
+	DBHost             string                   `json:"db_host,omitempty"`
+	AppURL             string                   `json:"app_url,omitempty"`
+	ExpiresAt          time.Time                `json:"expires_at"`
+	Verified           bool                     `json:"verified"`
+	Wiped              bool                     `json:"wiped,omitempty"`
 	Strategy           string                   `json:"strategy"`
 	ShopwareCLIVersion string                   `json:"shopware_cli_version,omitempty"`
 	ShopwareVersion    string                   `json:"shopware_version"`
@@ -29,8 +38,10 @@ type Audit struct {
 	DeniedRows         map[string]int64         `json:"denied_estimated_rows,omitempty"`
 	KeptOnPurpose      []string                 `json:"kept_on_purpose"`
 	OrdersSinceDays    int                      `json:"orders_since_days,omitempty"`
+	OrdersCutoff       string                   `json:"orders_cutoff,omitempty"` // first order date in the dump (UTC)
 	SkipSearchIndex    bool                     `json:"skip_search_index,omitempty"`
 	CodeExclude        []string                 `json:"code_exclude,omitempty"`
+	CodeSynced         bool                     `json:"code_synced,omitempty"` // <out>/code was synced by a clone, so purge removes it
 	Dump               *DumpResult              `json:"dump,omitempty"`
 	Phases             map[string]time.Duration `json:"phases_ns"`
 	Checks             []Check                  `json:"checks"`
@@ -64,4 +75,20 @@ func (a *Audit) write(dir string) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "clone.log.json"), data, 0o600)
+}
+
+// readAudit reads the clone.log.json of a previous run in dir; nil without error when there is none.
+func readAudit(dir string) (*Audit, error) {
+	data, err := os.ReadFile(filepath.Join(dir, "clone.log.json"))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	a := &Audit{}
+	if err := json.Unmarshal(data, a); err != nil {
+		return nil, err
+	}
+	return a, nil
 }

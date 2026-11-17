@@ -30,3 +30,59 @@ func TestBatchesKeepEveryQueryOnce(t *testing.T) {
 		}
 	}
 }
+
+func TestEmailExpected(t *testing.T) {
+	extra := []string{"acme_*.contact", "customer.acme_shop_mail"}
+	cases := []struct {
+		column string
+		want   bool
+	}{
+		{"system_config.configuration_value", true},
+		{"system_config.configuration_key", false},
+		{"mail_template_translation.content_html", true},
+		{"mail_header_footer_translation.footer_html", true},
+		{"sales_channel_domain.url", true},
+		{"cms_slot_translation.config", true},
+		{"product_translation.description", true},
+		{"snippet.value", true},
+		{"app_translation.privacy_policy_extensions", true},
+		{"acme_dealer.contact", true},
+		{"acme_dealer.notes", false},
+		{"customer.acme_shop_mail", true},
+		{"customer.email", false},
+		{"order_address.street", false},
+		{"product_review.content", false},
+		{"newsletter_recipient.email", false},
+		{"user.email", false},
+	}
+	for _, c := range cases {
+		if got := emailExpected(c.column, extra); got != c.want {
+			t.Errorf("emailExpected(%q) = %v, want %v", c.column, got, c.want)
+		}
+	}
+}
+
+func TestDifferingSalesChannelIDs(t *testing.T) {
+	a := lineSet("0a\n0b\n\n")
+	if n := differing(a, lineSet("0b\n0a")); n != 0 {
+		t.Errorf("same ids differ by %d", n)
+	}
+	if n := differing(a, lineSet("0a\n0c")); n != 2 {
+		t.Errorf("one swapped id: %d, want 2", n)
+	}
+}
+
+func TestSecretConfigRowsReadsBatchOutput(t *testing.T) {
+	out := "core.basicInformation.shopName\t{\"_value\": \"Demo\\\\Shop\"}\n" +
+		"core.mailerSettings.password\t{\"_value\": \"x\"}\n" +
+		"Acme.config.settings\t{\"_value\": {\\n\\t\"clientSecret\":\\t\"abc\"}}\n" +
+		"core.listing.productsPerPage\t{\"_value\": 24}\n" +
+		"core.app.shopId\t\n"
+	got := strings.Join(secretConfigRows(out), ",")
+	if got != "Acme.config.settings,core.app.shopId,core.mailerSettings.password" {
+		t.Errorf("secretConfigRows = %q", got)
+	}
+	if s := unescapeBatch(`a\\b\tc\nd\0`); s != "a\\b\tc\nd\x00" {
+		t.Errorf("unescapeBatch = %q", s)
+	}
+}

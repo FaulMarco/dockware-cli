@@ -127,7 +127,9 @@ func (d DumpPlan) ShopwareCLIConfig(now time.Time) ([]byte, error) {
 
 // StreamDump runs shopware-cli on the server. Rows are rewritten inside the
 // SELECT, so only anonymised data is ever serialised; the zstd stream goes
-// straight to the local file and nothing is written on the server.
+// straight to the local file and nothing is written on the server. The
+// DATABASE_URL resolved like the probe's is exported before shopware-cli
+// starts, so it dumps exactly the probed database; the URL is never printed.
 func StreamDump(ctx context.Context, r Remote, p *Probe, plan DumpPlan, version, out string, log io.Writer) (*DumpResult, error) {
 	res := &DumpResult{File: out, Compression: "zstd", Phases: map[string]time.Duration{}}
 	start := time.Now()
@@ -167,7 +169,7 @@ func StreamDump(ctx context.Context, r Remote, p *Probe, plan DumpPlan, version,
 	for i, a := range args {
 		quoted[i] = ShellQuote(a)
 	}
-	script := "cd " + ShellQuote(r.Root) + " && exec nice -n 10 " + strings.Join(quoted, " ")
+	script := r.dbEnvScript() + "exec nice -n 10 " + strings.Join(quoted, " ")
 
 	f, err := os.OpenFile(out, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -177,7 +179,10 @@ func StreamDump(ctx context.Context, r Remote, p *Probe, plan DumpPlan, version,
 	var errb bytes.Buffer
 	dumpStart := time.Now()
 	if err := r.Run(ctx, script, nil, f, io.MultiWriter(&errb, log)); err != nil {
-		return nil, Fail(StepDump, "shopware-cli dump on the server failed", err, strings.TrimSpace(errb.String()))
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("shopware-cli dump interrupted: %w", ctx.Err())
+		}
+		return nil, r.dbError(StepDump, "shopware-cli dump on the server failed", err, strings.TrimSpace(errb.String()))
 	}
 	res.Phases["dump"] = time.Since(dumpStart)
 	if st, err := f.Stat(); err == nil {
@@ -302,9 +307,12 @@ func ShadowDump(ctx context.Context, r Remote, p *Probe, c Classification, plan 
 		}
 		drop = "SET foreign_key_checks = 0; DROP TABLE IF EXISTS " + strings.Join(parts, ",")
 	}
-	// registered before the copy, so the schema is removed on every later failure
+	// registered before the copy, so the schema is removed on every later
+	// failure; own timeout, as ctx may already be cancelled
 	defer func() {
-		if _, err := r.MySQL(context.Background(), drop); err != nil {
+		dctx, cancel := context.WithTimeout(context.Background(), remoteCleanupTimeout)
+		defer cancel()
+		if _, err := r.MySQL(dctx, drop); err != nil {
 			fmt.Fprintf(log, "WARN dropping shadow %s failed: %v\n", shadow, err)
 		}
 	}()
@@ -313,6 +321,9 @@ func ShadowDump(ctx context.Context, r Remote, p *Probe, c Classification, plan 
 	sql := ShadowSQL(p, c, plan, shadow, createDB)
 	_, errb, err := r.run(ctx, r.dbEnvScript()+`exec nice -n 10 $M "$DBN"`, strings.NewReader(sql))
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("shadow copy interrupted: %w", ctx.Err())
+		}
 		return nil, r.dbError(StepShadow, "loading the anonymised copy into shadow schema "+shadow+" failed", err, errb)
 	}
 	res.Phases["copy"] = time.Since(copyStart)
@@ -335,6 +346,9 @@ st=$(mktemp /tmp/dwc.XXXXXX) || ` + shExit(exitNoTemp) + `
 rc=$(cat "$st"); rm -f "$st"; exit "$rc"`
 	var dumpErr bytes.Buffer
 	if err := r.Run(ctx, dumpScript, nil, f, &dumpErr); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("mysqldump of the shadow schema interrupted: %w", ctx.Err())
+		}
 		if remoteExit(err) == exitNoTemp {
 			return nil, &Error{Step: StepDump, Msg: "cannot create a temp file in /tmp on the server", Hint: "/tmp must be writable for the ssh user; check disk space and quota there", Err: err}
 		}

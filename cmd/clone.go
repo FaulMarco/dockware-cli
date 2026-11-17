@@ -25,7 +25,7 @@ func init() {
 	f.StringVar(&cloneOpts.Root, "path", "", "Shopware project root on the server (required)")
 	f.IntVar(&cloneOpts.SSHPort, "ssh-port", 0, "ssh port (default: ssh config)")
 	f.StringVar(&cloneOpts.Identity, "identity", "", "ssh private key (default: ssh config/agent)")
-	f.StringArrayVar(&cloneOpts.SSHOptions, "ssh-option", nil, "extra ssh -o option, e.g. StrictHostKeyChecking=no (repeatable)")
+	f.StringArrayVar(&cloneOpts.SSHOptions, "ssh-option", nil, "extra ssh -o option, e.g. ConnectTimeout=20 or ProxyJump=bastion (repeatable; host key checks cannot be switched off)")
 	f.StringVar(&cloneOpts.Strategy, "strategy", "stream", "stream: anonymise inside the dump query (no server writes); shadow: anonymised copy into a temporary schema, then dump")
 	f.StringVar(&cloneOpts.ShadowDB, "shadow-db", "", "shadow schema name (default <db>_dwc_shadow; must not exist or be empty)")
 	f.StringArrayVar(&cloneOpts.Limits, "limit", nil, "shopware-cli row limit table:rows (stream only; creates staging tables on the server)")
@@ -38,7 +38,7 @@ func init() {
 	f.StringVar(&cloneOpts.PHP, "php", "", "PHP version of the local shop, e.g. 8.3 (default: php in the config, else the server's version)")
 	f.StringVar(&cloneOpts.Node, "node", "", "node major version of the local shop and the default frontend image, e.g. 22 (default: node in the config, .nvmrc/.node-version/package.json of the code, else node -v on the server)")
 	f.StringVar(&cloneOpts.ConfigPath, "config", "", "clone config (default <code>/.dockware-clone.yml)")
-	f.StringVar(&cloneOpts.Name, "name", "", "compose project name (default dwc-<host>)")
+	f.StringVar(&cloneOpts.Name, "name", "", "compose project name (default dwc-<host>-<6 hex of sha256(path)>)")
 	f.StringVar(&cloneOpts.OutDir, "out", "", "output directory (default ./<name>)")
 	f.IntVar(&cloneOpts.Port, "port", 8000, "first local HTTP port to try")
 	f.IntVar(&cloneOpts.FrontendPort, "frontend-port", 3000, "first local frontend port to try")
@@ -48,6 +48,13 @@ func init() {
 	f.IntVar(&cloneOpts.VerifySample, "verify-sample", 50, "rows per column compared against the server")
 	f.BoolVar(&cloneOpts.DumpOnly, "dump-only", false, "stop after the anonymised dump (the stream strategy still needs Docker for shopware-cli)")
 	f.BoolVar(&cloneOpts.NoFrontend, "no-frontend", false, "do not start the configured headless frontend")
+	f.BoolVar(&cloneOpts.KeepUnverified, "keep-unverified", false, "keep the clone when anonymisation checks fail (default: containers, database volume and dump are removed); never share such a clone")
+	f.BoolVar(&cloneOpts.KeepDump, "keep-dump", false, "keep the dump file after a successful import (default: deleted)")
+	f.BoolVar(&cloneOpts.ReuseDump, "reuse-dump", false, "import the kept dump of the previous run in --out instead of dumping again, when target, path and rules hash match")
+	f.BoolVar(&cloneOpts.Force, "force", false, "use --out even when it holds a clone of another target or path (whose stack is removed), or files of no clone")
+	f.IntVar(&cloneOpts.RetentionDays, "retention-days", 0, "days until the clone counts as expired for 'dockware-cli clone purge --expired' (default: retention_days in the config, else 30)")
+	f.BoolVar(&cloneOpts.SSHAgent, "ssh-agent", false, "mount the host's ssh-agent for composer install even when composer.json has no ssh repositories (removed after the install)")
+	f.StringVar(&cloneOpts.Bind, "bind", "127.0.0.1", "host address the local shop and frontend ports listen on")
 	_ = cloneCmd.MarkFlagRequired("path")
 	rootCmd.AddCommand(cloneCmd)
 }
@@ -61,29 +68,46 @@ The database is anonymised on the server before it is transferred: personal
 data never reaches this machine. Log, queue, cache and session tables are
 exported without rows, extension tables are exported without rows unless
 allowed in .dockware-clone.yml. The source is only read (stream strategy).
+Without a local config, <path>/.dockware-clone.yml on the server is used.
+
+After the import every anonymised column is compared against the server. When
+a check fails, or the run fails or is cancelled after the import started, the
+clone fails closed: containers, the database volume and the dump are removed
+(--keep-unverified keeps them for debugging only). The dump is deleted after a
+verified import unless --keep-dump.
 
 The code comes from a local checkout (--code) or is synced from the server
 without runtime data, uploads, backups and secrets. vendor/ is never copied:
 composer install runs in the container with the PHP version of the server and
 the node version of the project (.nvmrc, .node-version, package.json). Media
-is served from the source URL instead of being copied.
+is served from the source URL instead of being copied. The shop listens on
+127.0.0.1 only (--bind).
+
+Every clone is registered with an expiry date (--retention-days, default 30).
+'dockware-cli clone list' shows them, 'dockware-cli clone purge --expired' removes
+expired clones with their data.
 
 Every failure names the step it happened in and what to do about it; the
 same is written to <out>/clone.log.json (error_step, error_hint). The exit
 code is non-zero on any failure, including failed verification checks.
 
 <ssh-target> is an ssh config alias, user@host or ssh://user@host:port.
-See docs/clone.md for the configuration reference.`,
-	Example: `  dockware clone shop-stage --path /var/www/shop --code ~/projects/shop
-  dockware clone shop-stage --path /var/www/shop --orders-since-days 90 --skip-search-index
-  dockware clone shop-stage --path /var/www/shop --exclude '/custom/static-plugins/Legacy*/' --max-code-size 500
-  dockware clone ssh://deploy@shop.example.com:2222 --path /var/www/html --strategy shadow
-  dockware clone shop-stage --path /var/www/shop --dump-only`,
+See ` + clone.DocsURL + ` for the configuration reference.`,
+	Example: `  dockware-cli clone shop-stage --path /var/www/shop --code ~/projects/shop
+  dockware-cli clone shop-stage --path /var/www/shop --orders-since-days 90 --skip-search-index
+  dockware-cli clone shop-stage --path /var/www/shop --exclude '/custom/static-plugins/Legacy*/' --max-code-size 500
+  dockware-cli clone ssh://deploy@shop.example.com:2222 --path /var/www/html --strategy shadow
+  dockware-cli clone shop-stage --path /var/www/shop --dump-only`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 		defer stop()
+		// after the first signal the default handling is back: a second Ctrl+C terminates
+		go func() {
+			<-ctx.Done()
+			stop()
+		}()
 		cloneOpts.Target = args[0]
 		flags := cmd.Flags()
 		if flags.Changed("orders-since-days") {

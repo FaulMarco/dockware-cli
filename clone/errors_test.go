@@ -3,6 +3,8 @@ package clone
 import (
 	"errors"
 	"fmt"
+	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -19,7 +21,9 @@ func TestFailHints(t *testing.T) {
 		{StepShadow, "ERROR 1044 (42000) at line 1: Access denied for user 'c1'@'localhost' to database 'shop_dwc_shadow'", "--strategy stream"},
 		{StepDatabase, "ERROR 1045 (28000): Access denied for user 'c1'@'localhost' (using password: YES)", "database credentials"},
 		{StepDatabase, "ERROR 2003 (HY000): Can't connect to MySQL server on 'db.internal' (111)", "DATABASE_URL host/port"},
-		{StepDocker, "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?", "start Docker Desktop"},
+		{StepDump, "Error 3699 (HY000): Timeout exceeded in regular expression match.", "regexp_time_limit"},
+		{StepShadow, "ERROR 3699 (HY000) at line 12: Timeout exceeded in regular expression match.", "no_data"},
+		{StepDocker, "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?", "start Docker"},
 		{StepDocker, "Bind for 0.0.0.0:8000 failed: port is already allocated", "--port"},
 		{StepDocker, "curl: (6) Could not resolve host: nodejs.org\nnvm: install v22.11.0 failed!", "no network access from the container"},
 		{StepDocker, "! WARNING: Version 'v16.0.0' does not exist.\nN/A: version \"v16.0.0\" is not yet installed.\n\nYou need to run `nvm install v16.0.0` to install and use it.", "pass --node <major>"},
@@ -27,7 +31,8 @@ func TestFailHints(t *testing.T) {
 		{StepComposer, "Failed to download shopware/core from dist: curl error 22 while downloading https://packages.shopware.com/x.zip: The requested URL returned error: 401 Unauthorized", "--composer-auth"},
 		{StepComposer, "curl error 28 while downloading https://repo.packagist.org/packages.json: Connection timed out after 10001 milliseconds", "no network access from the container"},
 		{StepComposer, "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.", "private git package"},
-		{StepComposer, "sh: 1: git: not found", "a required tool is missing"},
+		{StepComposer, "sh: 1: git: not found", "missing in the container"},
+		{StepDump, "bash: line 1: zstd: command not found", "missing on the server"},
 		{StepRsync, "rsync: [sender] opendir \"/x/files\" failed: Permission denied (13)\nrsync error: some files/attrs were not transferred (code 23)", "cannot read some project files"},
 		{StepRsync, "bash: rsync: command not found\nrsync: connection unexpectedly closed (0 bytes received so far) [Receiver]\nrsync error: error in rsync protocol data stream (code 12)", "rsync is missing on the server"},
 		{StepUpload, "sh: /tmp/dwc.x/shopware-cli: Permission denied", "noexec"},
@@ -75,6 +80,64 @@ func TestHintsAreStepScoped(t *testing.T) {
 		if h := Fail(c.step, "x", nil, c.output).(*Error).Hint; strings.Contains(h, c.forbidden) {
 			t.Errorf("%s %q: hint %q points at the server (%q)", c.step, c.output, h, c.forbidden)
 		}
+	}
+}
+
+func TestMissingToolHints(t *testing.T) {
+	// composer's "404: Not Found" is a missing package, not a missing tool
+	if h := Fail(StepComposer, "x", nil, "The \"https://repo.packagist.org/p2/acme/x.json\" file could not be downloaded (HTTP/2 404 ): 404: Not Found").(*Error).Hint; h != "" {
+		t.Errorf("composer 404 got hint %q", h)
+	}
+	// a missing tool after the import is no server problem
+	if h := Fail(StepImport, "x", nil, "sh: 1: zstd: not found").(*Error).Hint; strings.Contains(h, "server") {
+		t.Errorf("import step points at the server: %q", h)
+	}
+	// rsync missing on this machine, from the error chain or its text
+	notFound := &exec.Error{Name: "rsync", Err: exec.ErrNotFound}
+	for _, e := range []error{
+		rsyncError(fmt.Errorf("start: %w", notFound), ""),
+		rsyncError(errors.New(`exec: "rsync": executable file not found in $PATH`), ""),
+		Fail(StepRsync, "x", notFound, ""),
+	} {
+		if h := e.(*Error).Hint; !strings.Contains(h, "install rsync locally or pass --code <checkout>") {
+			t.Errorf("local rsync missing: hint %q", h)
+		}
+	}
+	// rsync missing on the server keeps its own hint
+	if h := rsyncError(errors.New("exit status 12"), "bash: rsync: command not found").(*Error).Hint; !strings.Contains(h, "on the server") {
+		t.Errorf("server rsync missing: hint %q", h)
+	}
+}
+
+func TestDiskFullHintIsStepAware(t *testing.T) {
+	const full = "write error: No space left on device"
+	for _, step := range []string{StepShadow, StepUpload, StepProbe} {
+		if h := Fail(step, "x", nil, full).(*Error).Hint; !strings.Contains(h, "on the server") {
+			t.Errorf("%s: hint %q", step, h)
+		}
+	}
+	for _, step := range []string{StepRsync, StepImport, StepDocker, StepPostImport} {
+		h := Fail(step, "x", nil, full).(*Error).Hint
+		if !strings.Contains(h, "on this machine") || strings.Contains(h, "/tmp") {
+			t.Errorf("%s: hint %q", step, h)
+		}
+	}
+	if h := Fail(StepDump, "x", nil, full).(*Error).Hint; !strings.Contains(h, "server") || !strings.Contains(h, "this machine") {
+		t.Errorf("dump: hint %q", h)
+	}
+}
+
+func TestDockerHintMatchesOS(t *testing.T) {
+	h := Fail(StepDocker, "x", nil, "Cannot connect to the Docker daemon at unix:///var/run/docker.sock").(*Error).Hint
+	desktop := runtime.GOOS == "darwin" || runtime.GOOS == "windows"
+	if strings.Contains(h, "Docker Desktop") != desktop {
+		t.Errorf("GOOS %s: hint %q", runtime.GOOS, h)
+	}
+}
+
+func TestDocsURL(t *testing.T) {
+	if !strings.HasPrefix(DocsURL, "https://") || !strings.HasSuffix(DocsURL, "/docs/clone.md") {
+		t.Errorf("DocsURL = %q", DocsURL)
 	}
 }
 

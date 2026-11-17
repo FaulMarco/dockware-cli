@@ -22,15 +22,30 @@ func TestFreePortKeepsPortOfPreviousRun(t *testing.T) {
 	defer ln.Close()
 	busy := ln.Addr().(*net.TCPAddr).Port
 
-	if got := FreePort(busy, nil); got == busy {
+	if got := FreePort(busy, "", nil); got == busy {
 		t.Errorf("port %d is busy and not the project's, FreePort returned it", busy)
 	}
 	own := publishedPorts(fmt.Sprintf("0.0.0.0:%d->80/tcp, [::]:%d->80/tcp\n6379/tcp\n", busy, busy))
-	if got := FreePort(busy, own); got != busy {
+	if got := FreePort(busy, "", own); got != busy {
 		t.Errorf("own port %d: got %d", busy, got)
 	}
 	if len(own) != 1 {
 		t.Errorf("unpublished container ports must not count: %v", own)
+	}
+}
+
+// TestFreePortSkipsPortHeldOnBind: on macOS/BSD a wildcard bind succeeds
+// while 127.0.0.1:port is held, so the bind address must be probed too.
+func TestFreePortSkipsPortHeldOnBind(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	busy := ln.Addr().(*net.TCPAddr).Port
+
+	if got := FreePort(busy, "127.0.0.1", nil); got == busy {
+		t.Errorf("port %d is held on 127.0.0.1, FreePort returned it", busy)
 	}
 }
 

@@ -28,8 +28,13 @@ type Remote struct {
 	ControlDir string   // holds the shared connection's socket; set by ShareConnection
 }
 
-// ParseTarget accepts "alias", "user@host" or "ssh://user@host:port".
+// ParseTarget accepts "alias", "user@host" or "ssh://user@host:port". A
+// target starting with "-" is rejected, as ssh and rsync would read it as an
+// option.
 func ParseTarget(target string) (Remote, error) {
+	if strings.HasPrefix(target, "-") {
+		return Remote{}, &Error{Step: StepConfig, Msg: "invalid ssh target " + target, Hint: "pass an ssh alias, user@host or ssh://user@host:port"}
+	}
 	if !strings.HasPrefix(target, "ssh://") {
 		return Remote{Target: target}, nil
 	}
@@ -41,10 +46,42 @@ func ParseTarget(target string) (Remote, error) {
 	if u.User != nil {
 		r.Target = u.User.Username() + "@" + r.Target
 	}
+	if strings.HasPrefix(r.Target, "-") {
+		return Remote{}, &Error{Step: StepConfig, Msg: "invalid ssh target " + target, Hint: "pass an ssh alias, user@host or ssh://user@host:port"}
+	}
 	if p := u.Port(); p != "" {
 		r.Port, _ = strconv.Atoi(p)
 	}
 	return r, nil
+}
+
+// ValidateSSHOptions rejects --ssh-option values that switch off host key
+// verification, so a clone never talks to an unverified server. Entries may
+// be "Key=value", "Key value", "-oKey=value" or a "-o" followed by its value.
+func ValidateSSHOptions(opts []string) error {
+	for _, o := range opts {
+		o = strings.TrimSpace(o)
+		if o == "-o" {
+			continue
+		}
+		if strings.HasPrefix(o, "-o") {
+			o = strings.TrimSpace(strings.TrimPrefix(o, "-o"))
+		}
+		f := strings.FieldsFunc(o, func(c rune) bool { return c == '=' || c == ' ' || c == '\t' })
+		if len(f) < 2 {
+			continue
+		}
+		key, val := f[0], strings.ToLower(strings.Trim(f[1], `"'`))
+		switch {
+		case strings.EqualFold(key, "StrictHostKeyChecking") && (val == "no" || val == "off"):
+		case strings.EqualFold(key, "UserKnownHostsFile") && val == "/dev/null":
+		default:
+			continue
+		}
+		return &Error{Step: StepConfig, Msg: "--ssh-option " + o + " disables host key verification",
+			Hint: "add the server's host key to ~/.ssh/known_hosts (ssh once interactively or ssh-keyscan and compare the fingerprint) instead; see " + DocsURL}
+	}
+	return nil
 }
 
 // SSHArgs returns the ssh options shared by ssh and rsync. The user's extra
@@ -61,8 +98,9 @@ func (r Remote) SSHArgs() []string {
 		args = append(args, "-i", r.Identity, "-o", "IdentitiesOnly=yes")
 	}
 	if r.ControlDir != "" {
-		// ControlPersist bounds a master left behind by a killed run
-		args = append(args, "-o", "ControlMaster=auto", "-o", "ControlPath="+r.ControlDir+"/cm", "-o", "ControlPersist=60")
+		// ControlPersist outlives idle gaps of a long import and bounds a
+		// master left behind by a killed run; done closes it with -O exit
+		args = append(args, "-o", "ControlMaster=auto", "-o", "ControlPath="+r.ControlDir+"/cm", "-o", "ControlPersist=30m")
 	}
 	return args
 }
@@ -104,9 +142,80 @@ func (r Remote) userSharing() bool {
 	return false
 }
 
+// targetArgs returns SSHArgs plus opts, then "--" and the target, so a target
+// can never be read as an ssh option.
+func (r Remote) targetArgs(opts ...string) []string {
+	return append(append(r.SSHArgs(), opts...), "--", r.Target)
+}
+
 // control sends a command (check, exit) to the shared connection's master.
 func (r Remote) control(ctx context.Context, command string) error {
-	return exec.CommandContext(ctx, "ssh", append(r.SSHArgs(), "-O", command, r.Target)...).Run()
+	return exec.CommandContext(ctx, "ssh", r.targetArgs("-O", command)...).Run()
+}
+
+// ResolvedHost returns the host (and port when not 22) ssh connects to for
+// r after applying ~/.ssh/config, for the audit; "" when ssh -G fails.
+func (r Remote) ResolvedHost(ctx context.Context) string {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ssh", r.targetArgs("-G")...).Output()
+	if err != nil {
+		return ""
+	}
+	return parseSSHConfigHost(string(out))
+}
+
+// parseSSHConfigHost reads hostname and port from `ssh -G` output.
+func parseSSHConfigHost(out string) string {
+	host, port := "", ""
+	for _, l := range strings.Split(out, "\n") {
+		k, v, _ := strings.Cut(strings.TrimSpace(l), " ")
+		switch strings.ToLower(k) {
+		case "hostname":
+			host = strings.TrimSpace(v)
+		case "port":
+			port = strings.TrimSpace(v)
+		}
+	}
+	if host == "" || port == "" || port == "22" {
+		return host
+	}
+	if strings.Contains(host, ":") {
+		return "[" + host + "]:" + port
+	}
+	return host + ":" + port
+}
+
+// remoteConfigName is the per-project clone config read from the project root on the server.
+const remoteConfigName = ".dockware-clone.yml"
+
+// remoteConfigMax caps the remote config read, so a stray big file cannot
+// flood memory.
+const remoteConfigMax = 1 << 20
+
+// ReadRemoteConfig reads <Root>/.dockware-clone.yml on the server; found is
+// false when the file does not exist.
+func (r Remote) ReadRemoteConfig(ctx context.Context) (data []byte, found bool, err error) {
+	p := ShellQuote(strings.TrimRight(r.Root, "/") + "/" + remoteConfigName)
+	out, errb, err := r.run(ctx, `test -e `+p+` || exit 0
+echo found
+head -c `+strconv.Itoa(remoteConfigMax+1)+` `+p, nil)
+	if err != nil {
+		var ce *Error
+		if errors.As(err, &ce) {
+			return nil, false, err
+		}
+		return nil, false, Fail(StepConfig, "reading "+remoteConfigName+" in "+r.Root+" on the server failed", err, errb)
+	}
+	body := strings.TrimPrefix(out, "found\n")
+	if body == out {
+		return nil, false, nil
+	}
+	if len(body) > remoteConfigMax {
+		return nil, true, &Error{Step: StepConfig, Msg: remoteConfigName + " in " + r.Root + " on the server is larger than 1 MiB",
+			Hint: "the project config only holds rules and settings; see " + DocsURL}
+	}
+	return []byte(body), true, nil
 }
 
 // masterLost reports whether the shared connection has died. Its clients
@@ -160,7 +269,7 @@ func (t *stderrTail) String() string { return strings.TrimSpace(string(t.buf)) }
 // remote exit 255, which php uses for fatal errors, unless stderr shows the
 // ssh client itself failed or the shared connection is gone.
 func (r Remote) Run(ctx context.Context, script string, stdin io.Reader, stdout, stderr io.Writer) error {
-	args := append(r.SSHArgs(), r.Target, "sh -c "+ShellQuote(script))
+	args := append(r.targetArgs(), "sh -c "+ShellQuote(script))
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 	tail := &stderrTail{}
 	cmd.Stdin, cmd.Stdout = stdin, stdout
@@ -255,21 +364,30 @@ func (r Remote) rootError(err error, stderr string) error {
 		Output: stderr, Err: err}
 }
 
-// dbEnvScript loads DATABASE_URL the way Shopware does (real env wins over
-// .env files) and exports the parts for the mysql client. The password only
-// ever lives in the remote MYSQL_PWD variable. The php output is captured
-// before eval so a php failure (unreadable .env) ends the script.
-func (r Remote) dbEnvScript() string {
-	return `cd ` + ShellQuote(r.Root) + ` || ` + shExit(exitNoRoot) + `
-E=$(php -r '
-if (is_file("vendor/autoload.php")) { require "vendor/autoload.php"; }
-if (class_exists("Symfony\\Component\\Dotenv\\Dotenv") && is_file(".env")) {
+// dbURLScript is php that loads the environment the way Shopware's runtime
+// does: Symfony Dotenv bootEnv reads .env.local.php when present, else .env,
+// .env.local (not for APP_ENV=test), .env.$APP_ENV and .env.$APP_ENV.local;
+// variables of the real environment win over all files. It leaves
+// DATABASE_URL in $raw or exits 1.
+const dbURLScript = `if (is_file("vendor/autoload.php")) { require "vendor/autoload.php"; }
+if (class_exists("Symfony\\Component\\Dotenv\\Dotenv") && (is_file(".env") || is_file(".env.dist") || is_file(".env.local.php"))) {
   (new Symfony\Component\Dotenv\Dotenv())->usePutenv()->bootEnv(getcwd()."/.env", "prod");
 }
 $raw = getenv("DATABASE_URL");
 if (!$raw) { fwrite(STDERR, "DATABASE_URL not found\n"); exit(1); }
-$u = parse_url($raw);
-$v = ["DBH" => $u["host"] ?? "127.0.0.1", "DBP" => (string)($u["port"] ?? 3306), "DBU" => rawurldecode($u["user"] ?? ""), "MYSQL_PWD" => rawurldecode($u["pass"] ?? ""), "DBN" => rawurldecode(ltrim($u["path"] ?? "", "/"))];
+`
+
+// dbEnvScript loads DATABASE_URL (dbURLScript) and exports it unchanged for
+// tools that read it themselves (shopware-cli, whose real-env value beats its
+// own .env lookup, so it dumps exactly the probed database) plus its parts for
+// the mysql client. The URL and password only ever live in remote variables
+// and are never printed. The php output is captured before eval so a php
+// failure (unreadable .env) ends the script.
+func (r Remote) dbEnvScript() string {
+	return `cd ` + ShellQuote(r.Root) + ` || ` + shExit(exitNoRoot) + `
+E=$(php -r '
+` + dbURLScript + `$u = parse_url($raw);
+$v = ["DATABASE_URL" => $raw, "DBH" => $u["host"] ?? "127.0.0.1", "DBP" => (string)($u["port"] ?? 3306), "DBU" => rawurldecode($u["user"] ?? ""), "MYSQL_PWD" => rawurldecode($u["pass"] ?? ""), "DBN" => rawurldecode(ltrim($u["path"] ?? "", "/"))];
 foreach ($v as $k => $x) { echo "export $k=" . escapeshellarg($x) . "\n"; }
 ') || ` + shExit(exitNoDatabaseURL) + `
 eval "$E"
@@ -322,6 +440,7 @@ type Probe struct {
 	ShopwareVersion string
 	MySQLVersion    string
 	Database        string
+	DBHost          string // host[:port] of the resolved DATABASE_URL, port only when not 3306; never credentials
 	BinlogFormat    string
 	CanCreateDB     bool
 	Tables          []string
@@ -353,15 +472,27 @@ const (
 	SalesChannelTypeAPI        = "f183ee5650cf4bdb8a774337575067a6"
 )
 
-// envScanScript lists .env keys and returns values only for keys that are
-// clearly not credentials. Secret values never leave the server; for a secret
-// key whose value is a URL only its scheme is reported (flag 2), so the local
-// stack can point redis DSNs at its own redis.
+// envScanScript lists the keys of .env, .env.local, .env.$APP_ENV and
+// .env.$APP_ENV.local in Symfony's load order (a later file's value wins;
+// .env.local is skipped for APP_ENV=test, the env files for APP_ENV=local)
+// and returns values only for keys that are clearly not credentials. Secret
+// values never leave the server; for a secret key whose value is a URL only
+// its scheme is reported (flag 2), so the local stack can point redis DSNs at
+// its own redis.
 const envScanScript = `php -r '
-$f = is_file(".env") ? file(".env", FILE_IGNORE_NEW_LINES) : [];
-foreach ($f as $l) {
-  if (!preg_match("/^\s*(?:export\s+)?([A-Z0-9_]+)\s*=\s*(.*)$/", $l, $m)) continue;
-  $k = $m[1]; $v = trim($m[2], " \"'\''");
+$vals = [];
+$load = function ($f) use (&$vals) {
+  if (!is_file($f) || !is_readable($f)) return;
+  foreach (file($f, FILE_IGNORE_NEW_LINES) as $l) {
+    if (preg_match("/^\s*(?:export\s+)?([A-Z0-9_]+)\s*=\s*(.*)$/", $l, $m)) $vals[$m[1]] = trim($m[2], " \"'\''");
+  }
+};
+$load(".env");
+$real = getenv("APP_ENV");
+$env = ($real !== false && $real !== "") ? $real : ($vals["APP_ENV"] ?? "prod");
+if ($env !== "test") { $load(".env.local"); if ($real === false || $real === "") $env = $vals["APP_ENV"] ?? $env; }
+if ($env !== "local" && preg_match("/^[A-Za-z0-9_-]+$/", $env)) { $load(".env.$env"); $load(".env.$env.local"); }
+foreach ($vals as $k => $v) {
   $secret = preg_match("/(SECRET|PASS|PWD|TOKEN|KEY|AUTH|CRED|SALT|PRIVATE|DSN|URL)/", $k) || preg_match("/(HOST|USER|ID)$/", $k);
   $safe = !$secret && preg_match("/^[A-Za-z0-9_.\/-]{0,40}$/", $v);
   $scheme = $secret && preg_match("#^([a-z][a-z0-9+.-]*)://#i", $v, $s) ? strtolower($s[1]) : "";
@@ -414,15 +545,16 @@ echo "gzip=$(command -v gzip >/dev/null 2>&1 && echo 1 || echo 0)"
 echo "shopware=$(php -r '$l=json_decode(file_get_contents("composer.lock"),true); foreach(array_merge($l["packages"],$l["packages-dev"]??[]) as $p){ if($p["name"]==="shopware/core"){ echo ltrim($p["version"],"v"); } }')"
 echo "storefront=$(test -d vendor/shopware/storefront && echo 1 || echo 0)"
 echo "composerauth=$(test -f auth.json && echo 1 || echo 0)"
-echo "appurl=$(php -r 'if(is_file("vendor/autoload.php")){require "vendor/autoload.php";} if(class_exists("Symfony\\Component\\Dotenv\\Dotenv")&&is_file(".env")){(new Symfony\Component\Dotenv\Dotenv())->usePutenv()->bootEnv(getcwd()."/.env","prod");} echo getenv("APP_URL");')"
+echo "appurl=$(php -r 'if(is_file("vendor/autoload.php")){require "vendor/autoload.php";} if(class_exists("Symfony\\Component\\Dotenv\\Dotenv")&&(is_file(".env")||is_file(".env.dist")||is_file(".env.local.php"))){(new Symfony\Component\Dotenv\Dotenv())->usePutenv()->bootEnv(getcwd()."/.env","prod");} echo getenv("APP_URL");')"
 echo "mediaurl=$(php -r '$u=""; foreach(glob("config/packages/*.yaml") as $f){ if(preg_match("/filesystem:\s*\n\s+public:\s*\n(?:\s+(?:type|config|root):.*\n)*\s+url:\s*[\"\x27]?([^\"\x27\s]+)/", file_get_contents($f), $m)){ $u=$m[1]; } } echo $u;')"
 echo "--env--"
 `+envScanScript+`
 echo "--php-modules--"
 php -m
 echo "--core--"
-{ grep -rhoiE "CREATE TABLE (IF NOT EXISTS )?[\`+"`"+`]?[a-zA-Z0-9_]+" vendor/shopware --include=*.php --include=*.sql | sed -E "s/.*TABLE (IF NOT EXISTS )?[\`+"`"+`]?//I"
-  grep -rhoE "ENTITY_NAME = .[a-z0-9_]+." vendor/shopware --include=*.php | sed -E "s/.*= .//; s/.$//"; } | tr A-Z a-z | sort -u
+C=""; for d in `+strings.Join(coreTableDirs, " ")+`; do test -d "$d" && C="$C $d"; done
+{ grep -rhoiE "CREATE TABLE (IF NOT EXISTS )?[\`+"`"+`]?[a-zA-Z0-9_]+" $C --include=*.php --include=*.sql | sed -E "s/.*TABLE (IF NOT EXISTS )?[\`+"`"+`]?//I"
+  grep -rhoE "ENTITY_NAME = .[a-z0-9_]+." $C --include=*.php | sed -E "s/.*= .//; s/.$//"; } | tr A-Z a-z | sort -u
 `, nil)
 	if err != nil {
 		return nil, r.probeError(err, errb)
@@ -478,18 +610,24 @@ echo "--core--"
 	p.CoreTables = ParseCoreTables(strings.Join(coreLines, "\n"))
 	p.PHPExtensions = parsePHPModules(strings.Join(moduleLines, "\n"))
 
-	meta, err := r.MySQL(ctx, `SELECT 'v', VERSION(), DATABASE(), @@binlog_format;
+	// the DATABASE_URL host goes into the audit; user and password stay on the server
+	meta, errb, err := r.run(ctx, r.dbEnvScript()+`printf 'h\t%s\t%s\n' "$DBH" "$DBP"
+exec $M -N -B "$DBN"`, strings.NewReader(`SELECT 'v', VERSION(), DATABASE(), @@binlog_format;
 SELECT 't', table_name, IFNULL(table_rows,0), IFNULL(data_length+index_length,0) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' ORDER BY table_name;
-SELECT 'c', table_name, column_name, is_nullable, data_type, IF(extra IN ('VIRTUAL GENERATED','STORED GENERATED'), 1, 0) FROM information_schema.columns WHERE table_schema = DATABASE();
+SELECT 'c', table_name, column_name, is_nullable, data_type, IF(extra IN ('VIRTUAL GENERATED','STORED GENERATED'), 1, 0), IFNULL(generation_expression, '') FROM information_schema.columns WHERE table_schema = DATABASE();
 SELECT 'd', LOWER(HEX(sc.id)), IFNULL(t.name, ''), LOWER(HEX(sc.type_id)), IFNULL(d.url, '') FROM sales_channel sc LEFT JOIN sales_channel_translation t ON t.sales_channel_id = sc.id AND t.language_id = sc.language_id LEFT JOIN sales_channel_domain d ON d.sales_channel_id = sc.id;
 SELECT 'g', COUNT(*) FROM information_schema.user_privileges WHERE privilege_type = 'CREATE' AND grantee = `+granteeSQL+`;
-`)
+`))
 	if err != nil {
-		return nil, err
+		return nil, r.dbError(StepDatabase, "querying the remote database failed", err, errb)
 	}
 	for _, l := range strings.Split(strings.TrimSpace(meta), "\n") {
 		f := strings.Split(l, "\t")
 		switch f[0] {
+		case "h":
+			if len(f) == 3 {
+				p.DBHost = dbHostPort(f[1], f[2])
+			}
 		case "v":
 			p.MySQLVersion, p.Database, p.BinlogFormat = f[1], f[2], f[3]
 		case "t":
@@ -501,7 +639,11 @@ SELECT 'g', COUNT(*) FROM information_schema.user_privileges WHERE privilege_typ
 			if p.Schema[t] == nil {
 				p.Schema[t] = map[string]Column{}
 			}
-			p.Schema[t][f[2]] = Column{Table: t, Name: f[2], Nullable: f[3] == "YES", DataType: strings.ToLower(f[4]), Generated: f[5] == "1"}
+			col := Column{Table: t, Name: f[2], Nullable: f[3] == "YES", DataType: strings.ToLower(f[4]), Generated: f[5] == "1"}
+			if len(f) > 6 {
+				col.GenerationExpression = f[6]
+			}
+			p.Schema[t][f[2]] = col
 		case "d":
 			p.Domains = append(p.Domains, Domain{SalesChannel: f[1], Name: f[2], TypeID: f[3], URL: f[4]})
 		case "g":
@@ -512,6 +654,21 @@ SELECT 'g', COUNT(*) FROM information_schema.user_privileges WHERE privilege_typ
 		p.MediaURL = strings.TrimRight(p.AppURL, "/")
 	}
 	return p, nil
+}
+
+// coreTableDirs are the Shopware packages whose tables count as core; tables
+// of shopware/commercial, composer-installed plugins and apps are extension
+// tables. The probe requires vendor/shopware/core, so platform checkouts
+// (src/Core) are not scanned.
+var coreTableDirs = []string{"vendor/shopware/core", "vendor/shopware/storefront", "vendor/shopware/administration", "vendor/shopware/elasticsearch"}
+
+// dbHostPort formats the DATABASE_URL host for the audit, with the port only
+// when it is not MySQL's default.
+func dbHostPort(host, port string) string {
+	if port == "" || port == "3306" {
+		return host
+	}
+	return host + ":" + port
 }
 
 // upload copies a local file into a fresh private temp dir on the server and
@@ -575,12 +732,18 @@ func (r Remote) putFile(ctx context.Context, dir, name string, content []byte) e
 	return nil
 }
 
+// remoteCleanupTimeout bounds cleanups that run after the run's context may
+// already be cancelled, so a hung connection cannot block the exit.
+const remoteCleanupTimeout = 30 * time.Second
+
 // cleanup removes the temp dir; errors are reported but not fatal.
 func (r Remote) cleanup(dir string) error {
 	if !strings.HasPrefix(dir, "/tmp/dwc.") {
 		return &Error{Step: StepUpload, Msg: "refusing to remove " + dir + " on the server"}
 	}
-	_, errb, err := r.run(context.Background(), "rm -rf "+ShellQuote(dir), nil)
+	ctx, cancel := context.WithTimeout(context.Background(), remoteCleanupTimeout)
+	defer cancel()
+	_, errb, err := r.run(ctx, "rm -rf "+ShellQuote(dir), nil)
 	if err != nil {
 		return Fail(StepUpload, "removing "+dir+" on the server failed", err, errb)
 	}

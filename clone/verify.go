@@ -65,7 +65,7 @@ func localPattern(r Rule, q string) string {
 
 // Verify proves the imported data is anonymised. Remote queries only receive
 // generated values and return counts, so no personal data is transferred.
-func Verify(ctx context.Context, r Remote, l *Local, p *Probe, c Classification, rules []Rule, sample int) ([]Check, error) {
+func Verify(ctx context.Context, r Remote, l *Local, p *Probe, c Classification, rules []Rule, sample int, expectedEmail []string) ([]Check, error) {
 	var checks []Check
 	exported := map[string]bool{}
 	for _, t := range append(append([]string(nil), c.Core...), c.Allowed...) {
@@ -79,6 +79,26 @@ func Verify(ctx context.Context, r Remote, l *Local, p *Probe, c Classification,
 	}
 	n, _ := strconv.Atoi(strings.TrimSpace(out))
 	checks = append(checks, Check{Name: "table count matches source", OK: n == len(p.Tables), Detail: fmt.Sprintf("local %d, remote %d", n, len(p.Tables))})
+
+	// 1b. identity: the sales channel ids must be those of the probed database
+	if exported["sales_channel"] {
+		const ids = "SELECT LOWER(HEX(id)) FROM sales_channel ORDER BY 1"
+		lo, err := l.SQL(ctx, ids)
+		if err != nil {
+			return nil, Fail(StepVerify, "reading the local sales channel ids failed", err, "")
+		}
+		ro, err := r.MySQL(ctx, ids+";")
+		if err != nil {
+			return nil, Fail(StepVerify, "reading the remote sales channel ids failed", err, "")
+		}
+		local, remote := lineSet(lo), lineSet(ro)
+		diff := differing(local, remote)
+		detail := fmt.Sprintf("local %d, remote %d", len(local), len(remote))
+		if diff > 0 {
+			detail = fmt.Sprintf("dump does not come from the probed database: %d of local %d / remote %d sales channel ids differ", diff, len(local), len(remote))
+		}
+		checks = append(checks, Check{Name: "sales channels match source", OK: diff == 0 && len(remote) > 0, Detail: detail})
+	}
 
 	// 2. every rewritten value has the generated shape
 	applicable := Applicable(rules, p.Schema)
@@ -154,18 +174,39 @@ func Verify(ctx context.Context, r Remote, l *Local, p *Probe, c Classification,
 	}
 	checks = append(checks, Check{Name: fmt.Sprintf("%d schema-only tables are empty", len(empty)), OK: len(filled) == 0, Detail: formatCounts(filled)})
 
-	// 5. no credentials in system_config
-	if _, ok := p.Schema["system_config"]; ok {
-		out, err := l.SQL(ctx, "SELECT COUNT(*) FROM system_config WHERE NOT ("+SystemConfigWhere()+")")
+	// 5. no credentials in system_config: keys and values are scanned on their
+	// own by MySQL, and the imported rows are checked again with isSecretConfig
+	// in Go, so neither a broken SystemConfigWhere nor a regex the MySQL engine
+	// reads differently can hide a leak
+	if exported["system_config"] {
+		secrets, err := countRows(ctx, l, []string{
+			"SELECT 'configuration_key', COUNT(*) FROM system_config WHERE " + secretKeySQL(),
+			"SELECT 'configuration_value', COUNT(*) FROM system_config WHERE " + secretValueSQL(),
+		})
 		if err != nil {
-			return nil, Fail(StepVerify, "counting secret system_config keys failed", err, "")
+			return nil, Fail(StepVerify, "scanning system_config for secrets failed", err, "")
 		}
-		cnt := strings.TrimSpace(out)
-		checks = append(checks, Check{Name: "no secret system_config keys", OK: cnt == "0", Detail: cnt + " secret keys"})
+		checks = append(checks, Check{Name: "no secrets in system_config keys or values", OK: len(secrets) == 0, Detail: formatCounts(secrets)})
+
+		rows, err := l.SQL(ctx, "SELECT configuration_key, IFNULL(CAST(configuration_value AS CHAR), '') FROM system_config")
+		if err != nil {
+			return nil, Fail(StepVerify, "reading system_config failed", err, "")
+		}
+		keys := secretConfigRows(rows)
+		detail := ""
+		if len(keys) > 0 {
+			shown := keys
+			if len(shown) > 10 {
+				shown = shown[:10]
+			}
+			detail = fmt.Sprintf("%d rows: %s", len(keys), strings.Join(shown, ", "))
+		}
+		checks = append(checks, Check{Name: "no secrets in system_config (Go re-check)", OK: len(keys) == 0, Detail: detail})
 	}
 
-	// 6. e-mail addresses outside example.com in any exported text column
-	// (informational: shop contact addresses are expected here)
+	// 6. e-mail addresses outside the placeholder domain in any exported text
+	// column: expected only in configuration and content columns
+	domain := strings.ReplaceAll(PlaceholderEmailDomain, ".", "[.]")
 	var scan []string
 	for _, t := range sortedTables(exported) {
 		cols := p.Schema[t]
@@ -177,15 +218,121 @@ func Verify(ctx context.Context, r Remote, l *Local, p *Probe, c Classification,
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			scan = append(scan, fmt.Sprintf("SELECT '%s.%s', COUNT(*) FROM `%s` WHERE `%s` LIKE '%%@%%' AND `%s` REGEXP '[A-Za-z0-9._%%+-]+@(?!example[.]com)[A-Za-z0-9-]+[.][A-Za-z.]{2,}'", t, name, t, name, name))
+			scan = append(scan, fmt.Sprintf("SELECT '%s.%s', COUNT(*) FROM `%s` WHERE `%s` LIKE '%%@%%' AND `%s` REGEXP '[A-Za-z0-9._%%+-]+@(?!%s([^A-Za-z0-9.-]|$))[A-Za-z0-9-]+[.][A-Za-z.]{2,}'", t, name, t, name, name, domain))
 		}
 	}
 	found, err := countRows(ctx, l, scan)
 	if err != nil {
 		return nil, Fail(StepVerify, "the e-mail scan failed", err, "")
 	}
-	checks = append(checks, Check{Name: "e-mail scan of exported text columns (review, not a failure)", OK: true, Detail: formatCounts(found)})
+	unexpected, expected := map[string]int{}, map[string]int{}
+	for col, cnt := range found {
+		if emailExpected(col, expectedEmail) {
+			expected[col] = cnt
+		} else {
+			unexpected[col] = cnt
+		}
+	}
+	var detail []string
+	if len(unexpected) > 0 {
+		detail = append(detail, "unexpected (add a rule, or expected_email_columns if they are shop addresses): "+formatCounts(unexpected))
+	}
+	if len(expected) > 0 {
+		detail = append(detail, "expected, review: "+formatCounts(expected))
+	}
+	checks = append(checks, Check{Name: "no e-mail addresses outside expected columns", OK: len(unexpected) == 0, Detail: strings.Join(detail, "; ")})
 	return checks, nil
+}
+
+// builtinEmailColumns hold shop, sender and content addresses, not customer data.
+var builtinEmailColumns = []string{
+	"system_config.configuration_value", "mail_template*.*", "mail_header_footer*.*", "sales_channel*.*",
+	"cms_*.*", "product*.*", "snippet.*", "app*.*",
+}
+
+// emailExpected reports whether e-mail addresses in column ("table.column")
+// are expected. The built-in globs never cover the customer/order family
+// (product_review matches product*.*); there only expected_email_columns count.
+func emailExpected(column string, extra []string) bool {
+	if matchAny(column, extra) {
+		return true
+	}
+	table := column
+	if i := strings.Index(column, "."); i >= 0 {
+		table = column[:i]
+	}
+	return !personalTable(table) && matchAny(column, builtinEmailColumns)
+}
+
+// secretConfigRows returns the sorted keys of the system_config rows in out
+// (mysql -B output of key and value) that isSecretConfig flags.
+func secretConfigRows(out string) []string {
+	var keys []string
+	for _, line := range strings.Split(out, "\n") {
+		key, value, ok := strings.Cut(line, "\t")
+		if !ok {
+			continue
+		}
+		key = unescapeBatch(key)
+		if isSecretConfig(key, unescapeBatch(value)) {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// unescapeBatch reverses the escaping of mysql -B: \\, \t, \n and \0.
+func unescapeBatch(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' || i+1 == len(s) {
+			b.WriteByte(s[i])
+			continue
+		}
+		i++
+		switch s[i] {
+		case 't':
+			b.WriteByte('\t')
+		case 'n':
+			b.WriteByte('\n')
+		case '0':
+			b.WriteByte(0)
+		default:
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
+}
+
+// lineSet returns the non-empty trimmed lines of a query result.
+func lineSet(out string) map[string]bool {
+	set := map[string]bool{}
+	for _, l := range strings.Split(out, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			set[l] = true
+		}
+	}
+	return set
+}
+
+// differing counts the entries present in only one of the sets.
+func differing(a, b map[string]bool) int {
+	n := 0
+	for k := range a {
+		if !b[k] {
+			n++
+		}
+	}
+	for k := range b {
+		if !a[k] {
+			n++
+		}
+	}
+	return n
 }
 
 func sortedTables(m map[string]bool) []string {

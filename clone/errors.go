@@ -3,9 +3,14 @@ package clone
 import (
 	"errors"
 	"fmt"
+	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 )
+
+// DocsURL is the clone documentation that hints and messages point to.
+const DocsURL = "https://github.com/dockware/dockware-cli/blob/main/docs/clone.md"
 
 // Steps a clone can fail in; they prefix the message and are stored in the audit.
 const (
@@ -64,7 +69,7 @@ func Fail(step, msg string, err error, output string) error {
 	if err != nil {
 		text += "\n" + err.Error()
 	}
-	return &Error{Step: step, Msg: msg, Hint: hintFor(step, text), Output: output, Err: err}
+	return &Error{Step: step, Msg: msg, Hint: hintForErr(step, err, text), Output: output, Err: err}
 }
 
 type hint struct {
@@ -76,6 +81,19 @@ type hint struct {
 // serverSteps talk to the source server over ssh; only their output can
 // carry ssh client or remote MySQL messages.
 var serverSteps = []string{StepSSH, StepProbe, StepDatabase, StepShadow, StepUpload, StepDump, StepRsync}
+
+// remoteDiskSteps write only on the server (temp files, shadow schema); a
+// full disk there is the server's /tmp or quota. StepDump writes on both
+// sides, rsync and everything after it only on this machine.
+var remoteDiskSteps = []string{StepSSH, StepProbe, StepDatabase, StepShadow, StepUpload}
+
+// containerSteps run tools inside the local containers.
+var containerSteps = []string{StepComposer, StepDocker, StepFrontend}
+
+// localToolMissing is the text of exec.ErrNotFound: the program is not on this machine.
+var localToolMissing = regexp.MustCompile(`executable file not found`)
+
+const rsyncMissingLocally = "rsync is not installed on this machine: install rsync locally or pass --code <checkout>"
 
 // localDBSteps run SQL against the MySQL inside the local shop container.
 var localDBSteps = []string{StepImport, StepPostImport, StepVerify}
@@ -102,13 +120,21 @@ var hints = []hint{
 		"the server rejected the database credentials from its .env (DATABASE_URL): check them on the server"},
 	{serverSteps, regexp.MustCompile(`(?i)Can't connect to (local )?MySQL server|ERROR 2002|ERROR 2003|ERROR 2005`),
 		"the database server is not reachable from the ssh host: check DATABASE_URL host/port in the server .env"},
+	// the system_config secret filter runs as REGEXP on the server; MySQL 8 aborts
+	// a match after regexp_time_limit steps (default 32, global scope only)
+	{serverSteps, regexp.MustCompile(`(?i)ERROR 3699\b|Timeout exceeded in regular expression match`),
+		"a large system_config value exceeded the server's regexp_time_limit in the secret filter (MySQL error 3699): raise it on the server (SET GLOBAL regexp_time_limit = 100000; the variable has no session scope and needs SYSTEM_VARIABLES_ADMIN, ask the hoster otherwise), or add system_config to no_data in .dockware-clone.yml (the local shop then runs on the default configuration; re-add needed keys via post_sql)"},
 	// the same MySQL errors from the container mean the local database, not the server
 	{localDBSteps, regexp.MustCompile(`(?i)Can't connect to (local )?MySQL server|ERROR 200[23]|SQLSTATE\[HY000\] \[200[23]\]`),
 		"the local database in the shop container is not up: docker compose logs shop"},
 	{localDBSteps, regexp.MustCompile(`(?i)Access denied for user|ERROR 1045`),
 		"the local MySQL in the shop container rejected root/root: the image is not a stock dockware image, check --image"},
+	{remoteDiskSteps, regexp.MustCompile(`(?i)No space left on device|Disk quota exceeded|ERROR 1114`),
+		"a disk is full on the server: free space in /tmp there or ask the hoster about the quota"},
+	{[]string{StepDump}, regexp.MustCompile(`(?i)No space left on device|Disk quota exceeded|ERROR 1114`),
+		"a disk is full: free space in /tmp on the server (or its quota), or on this machine where the dump is written (df -h)"},
 	{nil, regexp.MustCompile(`(?i)No space left on device|Disk quota exceeded|ERROR 1114`),
-		"a disk is full: free space in /tmp on the server or in Docker Desktop (docker system df)"},
+		localDiskHint()},
 	{[]string{StepUpload, StepDump}, regexp.MustCompile(`(?i)Exec format error|cannot execute binary file`),
 		"the uploaded shopware-cli does not run on the server (architecture or libc); try --strategy shadow"},
 	{[]string{StepUpload, StepDump}, regexp.MustCompile(`Permission denied`),
@@ -132,15 +158,55 @@ var hints = []hint{
 	{[]string{StepDocker}, regexp.MustCompile(`Version '.*' does not exist|is not yet installed`),
 		"the image could not switch node: a NODE_VERSION value reached the container; pass --node <major> instead"},
 	{[]string{StepDocker}, regexp.MustCompile(`(?i)Cannot connect to the Docker daemon|docker daemon is not running|error during connect|docker\.sock`),
-		"Docker is not running: start Docker Desktop and retry"},
+		"Docker is not running: " + startDocker() + " and retry"},
 	{[]string{StepDocker, StepFrontend}, regexp.MustCompile(`(?i)port is already allocated|address already in use|bind: .*in use`),
 		"the port is already in use: stop the other container or pass --port / --frontend-port"},
 	{[]string{StepDocker, StepFrontend}, regexp.MustCompile(`(?i)pull access denied|manifest unknown|not found: manifest|failed to resolve reference`),
 		"the image does not exist or needs a docker login: check --image / frontend.image"},
-	{nil, regexp.MustCompile(`(?i)command not found|: not found`),
-		"a required tool is missing on that host (see output); install it or use another strategy"},
+	// case-sensitive: composer's "404: Not Found" is no missing tool
+	{serverSteps, regexp.MustCompile(`command not found|: not found\b`),
+		"a required tool is missing on the server (see output); install it there or use another strategy"},
+	{containerSteps, regexp.MustCompile(`command not found|: not found\b`),
+		"a required tool is missing in the container (see output); check --image"},
 	{[]string{StepImport}, regexp.MustCompile(`(?i)ERROR \d+`),
 		"the dump does not import into the local MySQL: see the SQL error above; the local MySQL version may differ from the server"},
+}
+
+// hintForErr is hintFor plus the error chain: a program missing on this
+// machine (exec.ErrNotFound) is never a server or container problem. The
+// error text alone only counts for rsync, as `docker exec` reports a binary
+// missing in the container with the same words.
+func hintForErr(step string, err error, text string) string {
+	if step == StepRsync && (errors.Is(err, exec.ErrNotFound) || localToolMissing.MatchString(text)) {
+		return rsyncMissingLocally
+	}
+	if errors.Is(err, exec.ErrNotFound) {
+		switch step {
+		case StepDocker, StepFrontend, StepComposer, StepImport, StepPostImport, StepVerify:
+			return "the docker CLI is not installed on this machine or not in PATH: install Docker and retry"
+		}
+		return "a required program is not installed on this machine or not in PATH (see the error): install it and retry"
+	}
+	return hintFor(step, text)
+}
+
+// startDocker names how to start the engine on this OS.
+func startDocker() string {
+	switch runtime.GOOS {
+	case "darwin", "windows":
+		return "start Docker Desktop"
+	}
+	return "start Docker (e.g. sudo systemctl start docker)"
+}
+
+// localDiskHint covers a full disk on this machine; Docker Desktop keeps
+// images and volumes in its own disk image with a fixed size.
+func localDiskHint() string {
+	switch runtime.GOOS {
+	case "darwin", "windows":
+		return "a disk is full on this machine: free space on the laptop disk (df -h) or in Docker Desktop's disk image (docker system df, docker system prune, or raise the disk image size in Docker Desktop's settings)"
+	}
+	return "a disk is full on this machine: free space on the disk holding the clone and /var/lib/docker (df -h, docker system df, docker system prune)"
 }
 
 func hintFor(step, text string) string {

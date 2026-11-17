@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,29 +21,36 @@ import (
 // are anchored to the project root so plugin code with the same name stays,
 // and have no trailing "/" so that they also match symlinks: release-based
 // deploys link them into a shared directory, and such a link dangles locally.
+// Secrets are unanchored and match at any depth (frontend/.env,
+// custom/plugins/X/auth.json, private keys); that deliberately includes
+// templates such as .env.dist and .env.example, as the local stack writes its
+// own .env.
 var CodeExcludes = []string{
-	"/.env", "/.env.*", "/install.lock", "/auth.json", "/config/jwt",
+	".env", ".env.*", "auth.json", ".npmrc", "id_rsa*", "id_ed25519*", "id_ecdsa*",
+	"*.pem", "*.key", "*.p12", "*.pfx",
+	"/install.lock", "/config/jwt", "/config/secrets", "/.shopware-project.yml", "/.shopware-project.yaml",
 	".git/", ".idea/", ".DS_Store", "node_modules/", ".nuxt/", ".output/",
 	"/vendor", "/var", "/files", "/uploads", "/import", "/export", "/backup*/", "/dump*/",
 	"/public/media", "/public/thumbnail", "/public/sitemap", "/public/theme", "/public/bundles", "/public/build",
-	"*.sql", "*.sql.zst", "*.gz", "*.zip", "*.tar", "*.tar.*", "*.tgz", "*.bak",
-	"*.csv", "*.xlsx", "*.log", "*.pem", "*.key",
+	"*.sql", "*.sql.zst", "*.sql.bz2", "*.dump", "*.gz", "*.xz", "*.zip", "*.7z", "*.rar",
+	"*.tar", "*.tar.*", "*.tgz", "*.bak",
+	"*.csv", "*.xlsx", "*.xls", "*.log",
 }
 
-// codeIncludes come before CodeExcludes in the rsync filter chain: csv and
-// xlsx files count as fixtures only where plugin and project code keep them,
-// in a Resources/ or test directory below custom/ and src/. rsync's "**"
+// codeIncludes come before CodeExcludes in the rsync filter chain: csv, xls
+// and xlsx files count as fixtures only where plugin and project code keep
+// them, in a Resources/ or test directory below custom/ and src/. rsync's "**"
 // spans slashes, so that directory may sit at any depth, e.g.
 // custom/plugins/Acme/src/Resources/fixtures/products.csv; it never matches
 // an empty path segment, hence the extra /src/Resources/ pattern. Exports a
 // plugin keeps elsewhere (custom/plugins/Acme/import/customers.csv) stay on
 // the server. The patterns only match files, so no directory is affected.
 var codeIncludes = []string{
-	"/custom/**/Resources/**.csv", "/custom/**/Resources/**.xlsx",
-	"/custom/**/tests/**.csv", "/custom/**/tests/**.xlsx",
-	"/custom/**/Tests/**.csv", "/custom/**/Tests/**.xlsx",
-	"/src/Resources/**.csv", "/src/Resources/**.xlsx",
-	"/src/**/Resources/**.csv", "/src/**/Resources/**.xlsx",
+	"/custom/**/Resources/**.csv", "/custom/**/Resources/**.xlsx", "/custom/**/Resources/**.xls",
+	"/custom/**/tests/**.csv", "/custom/**/tests/**.xlsx", "/custom/**/tests/**.xls",
+	"/custom/**/Tests/**.csv", "/custom/**/Tests/**.xlsx", "/custom/**/Tests/**.xls",
+	"/src/Resources/**.csv", "/src/Resources/**.xlsx", "/src/Resources/**.xls",
+	"/src/**/Resources/**.csv", "/src/**/Resources/**.xlsx", "/src/**/Resources/**.xls",
 }
 
 // codeMaxFileMB is the real run's --max-size in MiB (rsync's "m" suffix):
@@ -72,6 +80,10 @@ func SyncCode(ctx context.Context, r Remote, dst string, o CodeSyncOptions, log 
 			return &Error{Step: StepConfig, Msg: fmt.Sprintf("invalid exclude pattern %q", p),
 				Hint: "exclude patterns are rsync patterns on one line, e.g. /public/catalogs/ or *.psd"}
 		}
+	}
+	if runtime.GOOS == "windows" {
+		return &Error{Step: StepRsync, Msg: "code sync needs rsync with POSIX paths",
+			Hint: "run dockware-cli clone from WSL, or pass --code <checkout>"}
 	}
 	src := strings.TrimRight(r.Root, "/") + "/"
 	if o.MaxBytes > 0 {
@@ -103,14 +115,16 @@ func SyncCode(ctx context.Context, r Remote, dst string, o CodeSyncOptions, log 
 
 // rsyncArgs builds the pull command. The real run drops files above
 // codeMaxFileMB with --max-size; the dry run omits it and lists every file
-// with its size instead. Filter order: user excludes, then the fixture
-// includes, then the built-in excludes (first match wins).
+// with its size instead. Both copy symlinks that point outside the project
+// (Deployer shared/, absolute links) as their content, so the dry run
+// measures what the real run transfers. Filter order: user excludes, then the
+// fixture includes, then the built-in excludes (first match wins).
 func rsyncArgs(r Remote, src, dst string, exclude []string, dryRun bool) []string {
 	ssh := []string{"ssh"}
 	for _, a := range r.SSHArgs() {
 		ssh = append(ssh, ShellQuote(a))
 	}
-	args := []string{"-a", "--compress", "--delete", "-e", strings.Join(ssh, " ")}
+	args := []string{"-a", "--copy-unsafe-links", "--compress", "--delete", "-e", strings.Join(ssh, " ")}
 	if dryRun {
 		args = append(args, "--dry-run", "--out-format=%l %n")
 	} else {
@@ -249,7 +263,7 @@ func rsyncError(err error, stderr string) error {
 		}
 	}
 	e := &Error{Step: StepRsync, Msg: "rsync from the server failed", Err: err, Output: output,
-		Hint: hintFor(StepRsync, stderr+"\n"+err.Error())}
+		Hint: hintForErr(StepRsync, err, stderr+"\n"+err.Error())}
 	if e.Hint == "" && rsyncUnknownOption.MatchString(stderr) {
 		e.Hint = "the local rsync is too old or is openrsync (macOS default): install rsync 3.1 or newer (brew install rsync) and put it first in PATH"
 	}

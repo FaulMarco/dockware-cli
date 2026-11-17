@@ -1,11 +1,16 @@
 package clone
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 func coreSet(extra ...string) map[string]bool {
@@ -369,5 +374,329 @@ func TestImportSplitterSendsTriggersAfterSchemaOnlyTableToPost(t *testing.T) {
 	}
 	if strings.Contains(post, "INSERT INTO `a`") {
 		t.Errorf("post.sql must hold no data:\n%s", post)
+	}
+}
+
+func TestDefaultNameHashesTheProjectRoot(t *testing.T) {
+	a := defaultName("deploy@shop.example.com", "/var/www/shop")
+	b := defaultName("deploy@shop.example.com", "/var/www/shop-stage")
+	if !strings.HasPrefix(a, "dwc-shop-example-com-") || len(a) != len("dwc-shop-example-com-")+6 {
+		t.Errorf("defaultName = %q, want dwc-shop-example-com-<6 hex>", a)
+	}
+	if a == b {
+		t.Errorf("two roots on one host share the name %q", a)
+	}
+	if c := defaultName("shop.example.com", "/var/www/shop/"); c != a {
+		t.Errorf("trailing slash changes the name: %q != %q", c, a)
+	}
+}
+
+func TestRegistryListsLatestStatePerOutDir(t *testing.T) {
+	t.Setenv(registryEnv, filepath.Join(t.TempDir(), "sub", "clones.jsonl"))
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	existing := t.TempDir()
+	entries := []RegistryEntry{
+		{Event: EventClone, Name: "renewed", OutDir: "/clones/renewed", Time: now.AddDate(0, 0, -40), ExpiresAt: now.AddDate(0, 0, -10)},
+		{Event: EventClone, Name: "renewed", OutDir: "/clones/renewed", Time: now.AddDate(0, 0, -1), ExpiresAt: now.AddDate(0, 0, 29), Verified: true},
+		{Event: EventClone, Name: "purged", OutDir: "/clones/purged", Time: now.AddDate(0, 0, -5), ExpiresAt: now.AddDate(0, 0, 25)},
+		{Event: EventPurge, Name: "purged", OutDir: "/clones/purged", Time: now.AddDate(0, 0, -4)},
+		{Event: EventWipe, Name: "wiped", OutDir: "/clones/wiped", Time: now.AddDate(0, 0, -3)},
+		{Event: EventClone, Name: "old", OutDir: "/clones/old", Time: now.AddDate(0, 0, -60), ExpiresAt: now.AddDate(0, 0, -30)},
+		{Event: EventClone, Name: "here", OutDir: existing, Time: now.AddDate(0, 0, -2), ExpiresAt: now.AddDate(0, 0, 28)},
+	}
+	for _, e := range entries {
+		if err := appendRegistry(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path, _ := RegistryPath()
+	if runtime.GOOS != "windows" {
+		if st, err := os.Stat(path); err != nil || st.Mode().Perm() != 0o600 {
+			t.Fatalf("registry file: %v, mode %v", err, st)
+		}
+		if st, err := os.Stat(filepath.Dir(path)); err != nil || st.Mode().Perm() != 0o700 {
+			t.Fatalf("registry dir: %v, mode %v", err, st)
+		}
+	}
+	got, err := listClones(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	state := map[string]CloneInfo{}
+	for _, c := range got {
+		names = append(names, c.Name)
+		state[c.Name] = c
+	}
+	if strings.Join(names, ",") != "old,wiped,here,renewed" {
+		t.Fatalf("clones = %v, want old,wiped,here,renewed (oldest first, purged left out)", names)
+	}
+	if !state["wiped"].Wiped || state["renewed"].Wiped {
+		t.Errorf("only the wiped clone carries Wiped: %+v", got)
+	}
+	if !state["old"].Expired || state["renewed"].Expired || state["here"].Expired {
+		t.Errorf("expired flags wrong: %+v", got)
+	}
+	if !state["renewed"].Verified {
+		t.Errorf("renewed must carry the latest entry: %+v", state["renewed"])
+	}
+	if state["old"].Exists || !state["here"].Exists {
+		t.Errorf("exists flags wrong: %+v", got)
+	}
+}
+
+func TestRegistrySurvivesTruncatedAndOverlongLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "clones.jsonl")
+	t.Setenv(registryEnv, path)
+	// a crash cut the last entry off without its newline
+	if err := os.WriteFile(path, []byte(`{"event":"clone","name":"cut","out_dir":"/clones/cut","expi`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendRegistry(RegistryEntry{Event: EventClone, Name: "after-cut", OutDir: "/clones/after-cut"}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// longer than the 1 MiB a line scanner accepts
+	if _, err := f.WriteString(strings.Repeat("x", 2<<20) + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	// one byte ahead, so the cap falls inside a rune
+	long := "a" + strings.Repeat("ü", maxRegistryError)
+	if err := appendRegistry(RegistryEntry{Event: EventClone, Name: "after-long", OutDir: "/clones/after-long", Error: long}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ListClones()
+	if err != nil {
+		t.Fatalf("ListClones = %v; a broken line must not hide the other clones", err)
+	}
+	var names []string
+	for _, c := range got {
+		names = append(names, c.Name)
+		if c.Name == "after-long" && (len(c.Error) > maxRegistryError+len(" …") || !strings.HasPrefix(long, strings.TrimSuffix(c.Error, " …"))) {
+			t.Errorf("Error not capped at a rune boundary: %d bytes", len(c.Error))
+		}
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "after-cut,after-long" {
+		t.Fatalf("clones = %v, want after-cut,after-long", names)
+	}
+}
+
+// writeCloneDir creates dir with the given files (a name ending in / is a directory).
+func writeCloneDir(t *testing.T, dir string, files map[string]string) {
+	t.Helper()
+	for name, content := range files {
+		p := filepath.Join(dir, name)
+		if strings.HasSuffix(name, "/") {
+			if err := os.MkdirAll(p, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+var cloneWrittenFiles = map[string]string{
+	"clone.log.json": "{}", "docker-compose.yml": "name: dwc-shop\n", "shop.env": "", "frontend.env": "", "php-clone.ini": "",
+	"apache-env.conf": "", "apache-media.conf": "", ".dockware-clone.remote.yml": "", "dump.sql.zst": "", "dump.sql.gz.tmp": "",
+}
+
+func TestRemoveCloneFilesKeepsWhatTheCloneDidNotWrite(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "out")
+	files := map[string]string{"notes.txt": "mine", "code/composer.json": "{}", "shop/": ""}
+	for k, v := range cloneWrittenFiles {
+		files[k] = v
+	}
+	writeCloneDir(t, dir, files)
+	// code/ is a --code checkout here: the clone did not sync it
+	kept, err := removeCloneFiles(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(kept)
+	if strings.Join(kept, ",") != "code,notes.txt,shop" {
+		t.Errorf("kept = %v, want code,notes.txt,shop", kept)
+	}
+	for name := range cloneWrittenFiles {
+		if fileExists(filepath.Join(dir, name)) {
+			t.Errorf("%s written by the clone survived", name)
+		}
+	}
+	for _, name := range []string{"notes.txt", "code/composer.json", "shop"} {
+		if !fileExists(filepath.Join(dir, name)) {
+			t.Errorf("%s was not written by the clone but is gone", name)
+		}
+	}
+}
+
+func TestRemoveCloneFilesRemovesSyncedCodeAndTheDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "out")
+	files := map[string]string{"code/composer.json": "{}", "code/public/index.php": ""}
+	for k, v := range cloneWrittenFiles {
+		files[k] = v
+	}
+	writeCloneDir(t, dir, files)
+	kept, err := removeCloneFiles(dir, true)
+	if err != nil || len(kept) > 0 {
+		t.Fatalf("removeCloneFiles = %v, %v", kept, err)
+	}
+	if fileExists(dir) {
+		t.Error("the emptied output directory must be removed")
+	}
+}
+
+// fakeDocker puts a docker that succeeds without doing anything first in PATH.
+func fakeDocker(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake docker is a shell script")
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+}
+
+func TestWipedCloneIsListedAndPurged(t *testing.T) {
+	fakeDocker(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv(registryEnv, filepath.Join(t.TempDir(), "clones.jsonl"))
+	dir := filepath.Join(t.TempDir(), "dwc-shop")
+	audit, _ := json.Marshal(Audit{Name: "dwc-shop", Wiped: true, CodeSynced: true})
+	writeCloneDir(t, dir, map[string]string{"clone.log.json": string(audit), "docker-compose.yml": "name: dwc-shop\n",
+		"shop.env": "", ".dockware-clone.remote.yml": "", "code/composer.json": "{}"})
+	if err := appendRegistry(RegistryEntry{Event: EventWipe, Name: "dwc-shop", OutDir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ListClones()
+	if err != nil || len(got) != 1 || !got[0].Wiped || got[0].OutDir != dir {
+		t.Fatalf("ListClones = %+v, %v; want the wiped clone", got, err)
+	}
+	if err := Purge(context.Background(), got[0], os.Stderr); err != nil {
+		t.Fatal(err)
+	}
+	if fileExists(dir) {
+		t.Error("the wiped clone's leftovers must be purged")
+	}
+	if got, _ := ListClones(); len(got) != 0 {
+		t.Errorf("ListClones after purge = %+v", got)
+	}
+}
+
+func TestUnregisteredCloneNeedsCloneFiles(t *testing.T) {
+	dir := t.TempDir()
+	writeCloneDir(t, dir, map[string]string{"clone.log.json": `{"target":"shop","root":"/var/www/shop","verified":true}`,
+		"docker-compose.yml": "name: dwc-shop\nservices: {}\n"})
+	c, err := UnregisteredClone(dir)
+	if err != nil || c.Name != "dwc-shop" || c.Target != "shop" || c.Root != "/var/www/shop" || !c.Verified {
+		t.Fatalf("UnregisteredClone = %+v, %v", c, err)
+	}
+	noCompose := t.TempDir()
+	writeCloneDir(t, noCompose, map[string]string{"clone.log.json": "{}"})
+	if _, err := UnregisteredClone(noCompose); err == nil {
+		t.Error("a directory without docker-compose.yml has no project to purge")
+	}
+	noAudit := t.TempDir()
+	writeCloneDir(t, noAudit, map[string]string{"docker-compose.yml": "name: other\n"})
+	if _, err := UnregisteredClone(noAudit); err == nil {
+		t.Error("a compose project without clone.log.json is no clone")
+	}
+}
+
+func TestRulesHashStableAcrossDaysOfTheOrderWindow(t *testing.T) {
+	p := &Probe{Schema: orderSchema(map[string][]string{"order": {"id", "order_date_time"}, "order_line_item": {"id", "order_id"}})}
+	newPlan := func() DumpPlan {
+		return DumpPlan{Rewrites: map[string]map[string]string{"customer": {"email": "'x'"}}, Where: map[string]string{"system_config": "1=1"}}
+	}
+	today, tomorrow := newPlan(), newPlan()
+	h1, c1 := applyOrderWindow(&today, p, 30, windowNow)
+	h2, c2 := applyOrderWindow(&tomorrow, p, 30, windowNow.AddDate(0, 0, 1))
+	if c1 == c2 || today.Where["order"] == tomorrow.Where["order"] || !strings.Contains(today.Where["order"], c1) {
+		t.Fatalf("each day's dump uses its own cutoff: %q %q / %q %q", c1, c2, today.Where["order"], tomorrow.Where["order"])
+	}
+	if h1 != h2 {
+		t.Errorf("rules hash changed with the day: %s != %s", h1, h2)
+	}
+	if today.Where["system_config"] != "1=1" {
+		t.Errorf("the window replaced an existing condition: %v", today.Where)
+	}
+	longer := newPlan()
+	if h, _ := applyOrderWindow(&longer, p, 31, windowNow); h == h1 {
+		t.Error("another window length must change the rules hash")
+	}
+	all := newPlan()
+	if h, c := applyOrderWindow(&all, p, 0, windowNow); c != "" || h == h1 || len(all.Where) != 1 {
+		t.Errorf("days=0: hash %s, cutoff %q, where %v; want no window", h, c, all.Where)
+	}
+}
+
+func TestListClonesWithoutRegistry(t *testing.T) {
+	t.Setenv(registryEnv, filepath.Join(t.TempDir(), "missing.jsonl"))
+	got, err := ListClones()
+	if err != nil || len(got) != 0 {
+		t.Fatalf("ListClones = %v, %v; want nothing", got, err)
+	}
+}
+
+func TestPurgeGuardRefusesForeignDirectories(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	plain := filepath.Join(home, "projects")
+	cloneDir := filepath.Join(home, "dwc-shop-abc123")
+	for _, d := range []string{plain, cloneDir} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cloneDir, "clone.log.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{"", "relative/dir", string(filepath.Separator), home, filepath.Dir(home), plain} {
+		if err := purgeGuard(dir); err == nil {
+			t.Errorf("purgeGuard(%q) = nil, want a refusal", dir)
+		}
+	}
+	if err := purgeGuard(cloneDir); err != nil {
+		t.Errorf("purgeGuard(clone dir) = %v", err)
+	}
+	if err := purgeGuard(filepath.Join(home, "gone")); err != nil {
+		t.Errorf("purgeGuard(missing dir) = %v; a vanished clone must still leave the registry", err)
+	}
+}
+
+func TestReusableDumpNeedsSameRulesAndFile(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "dump.sql.zst")
+	if err := os.WriteFile(file, []byte("dump"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prev := &Audit{Target: "shop", Root: "/var/www", RulesHash: "abc", Dump: &DumpResult{File: "/elsewhere/dump.sql.zst", Bytes: 4}}
+	d, err := reusableDump(prev, dir, "shop", "/var/www", "abc")
+	if err != nil || d.File != file || d.Compression != "zstd" {
+		t.Fatalf("reusableDump = %+v, %v", d, err)
+	}
+	if _, err := reusableDump(prev, dir, "shop", "/var/www", "other"); err == nil {
+		t.Error("a changed rules hash must not reuse the dump")
+	}
+	if _, err := reusableDump(prev, dir, "shop", "/srv/other", "abc"); err == nil {
+		t.Error("another root must not reuse the dump")
+	}
+	prev.Dump.Bytes = 5
+	if _, err := reusableDump(prev, dir, "shop", "/var/www", "abc"); err == nil {
+		t.Error("a dump whose size changed must not be reused")
 	}
 }

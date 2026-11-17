@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -113,9 +114,13 @@ func DefaultRules() []Rule {
 
 	add("order", KindNull, "customer_comment", "internal_comment", "custom_fields")
 	add("order", KindToken, "deep_link_code")
+	// order_line_item.payload and label stay: product data the order view needs
+	add("order_line_item", KindNull, "custom_fields")
 	add("order_delivery", KindEmptyJSON, "tracking_codes")
-	add("order_transaction", KindNull, "custom_fields")
+	add("order_delivery", KindNull, "custom_fields")
+	add("order_transaction", KindNull, "custom_fields", "validation_data")
 	add("order_transaction_capture", KindNull, "external_reference", "custom_fields")
+	add("order_transaction_capture_refund", KindNull, "external_reference", "reason", "custom_fields")
 
 	add("newsletter_recipient", KindEmail, "email")
 	add("newsletter_recipient", KindFirstName, "first_name")
@@ -128,7 +133,10 @@ func DefaultRules() []Rule {
 
 	add("product_review", KindEmail, "email", "external_email")
 	add("product_review", KindFirstName, "external_user")
+	add("product_review", KindNull, "comment", "custom_fields")
 	add("promotion_individual_code", KindNull, "payload")
+	// Shopware stores the data of the last sent mail (order, customer) here
+	add("mail_template_type", KindNull, "template_data")
 
 	add("user", KindUsername, "username")
 	add("user", KindEmail, "email")
@@ -141,6 +149,164 @@ func DefaultRules() []Rule {
 	add("app", KindToken, "app_secret")
 
 	return rules
+}
+
+// PlaceholderEmailDomain is the domain of every rewritten e-mail address.
+const PlaceholderEmailDomain = "example.com"
+
+// personalTable reports whether a table belongs to the customer/order family,
+// whose custom_fields and JSON columns are nulled unless configured otherwise.
+func personalTable(table string) bool {
+	t := strings.ToLower(table)
+	switch t {
+	case "customer", "order", "newsletter_recipient", "cart", "product_review", "mail_template_type":
+		return true
+	}
+	return strings.HasPrefix(t, "customer_") || strings.HasPrefix(t, "order_")
+}
+
+// structuralJSONColumns of the customer/order family hold calculated prices,
+// states or ids and no personal data; the admin cannot load an order without them.
+var structuralJSONColumns = map[string]bool{
+	"order.price": true, "order.shipping_costs": true, "order.item_rounding": true, "order.total_rounding": true, "order.rule_ids": true,
+	"order_line_item.price": true, "order_line_item.price_definition": true, "order_line_item.payload": true, "order_line_item.states": true,
+	"order_delivery.shipping_costs": true, "order_delivery_position.price": true,
+	"order_transaction.amount": true, "order_transaction_capture.amount": true,
+	"order_transaction_capture_refund.amount": true, "order_transaction_capture_refund_position.amount": true,
+	"customer.tag_ids": true, "customer_specific_features.features": true,
+	"mail_template_type.available_entities": true,
+}
+
+// EffectiveRules is the rule set of a clone: the defaults, a null rule for
+// every custom_fields and JSON column of the customer/order family, minus
+// keep_columns, with the project rules on top (a project rule replaces the
+// rule for its column). Default rules for columns the source lacks are
+// skipped later; project rules must name existing columns. JSON columns a
+// generated column of the same table reads are never cleared by default:
+// a NOT NULL generated column would make the shadow copy or the import fail.
+func EffectiveRules(s Schema, cfg *ProjectConfig) ([]Rule, error) {
+	if cfg == nil {
+		cfg = &ProjectConfig{}
+	}
+	var unknown []string
+	for _, r := range cfg.Rules {
+		if _, ok := s[r.Table][r.Column]; !ok {
+			unknown = append(unknown, r.Table+"."+r.Column)
+		}
+	}
+	if len(unknown) > 0 {
+		return nil, &Error{Step: StepConfig,
+			Msg:  ".dockware-clone.yml: rules name columns the source database does not have: " + strings.Join(unknown, ", "),
+			Hint: "fix or remove these rules in .dockware-clone.yml (table and column are the MySQL names); see " + DocsURL + " (configuration)"}
+	}
+
+	keep := map[string]bool{}
+	for _, k := range cfg.KeepColumns {
+		keep[strings.ToLower(k)] = true
+	}
+	var rules []Rule
+	var notNull []string
+	covered := map[string]bool{}
+	genRefs := generationRefs(s)
+	feedsGenerated := func(table, column string) bool {
+		c, ok := s[table][column]
+		return ok && c.DataType == "json" && genRefs[strings.ToLower(table+"."+column)]
+	}
+	for _, r := range DefaultRules() {
+		key := strings.ToLower(r.Table + "." + r.Column)
+		covered[key] = true
+		if keep[key] {
+			if r.Kind == KindNull {
+				continue
+			}
+			notNull = append(notNull, key)
+		}
+		if r.Kind == KindNull && feedsGenerated(r.Table, r.Column) {
+			continue
+		}
+		rules = append(rules, r)
+	}
+	if len(notNull) > 0 {
+		return nil, &Error{Step: StepConfig,
+			Msg:  ".dockware-clone.yml: keep_columns can only lift rules that clear a column, not: " + strings.Join(notNull, ", "),
+			Hint: "remove these entries from keep_columns; a rules entry can change how such a column is anonymised, see " + DocsURL + " (configuration)"}
+	}
+
+	tables := make([]string, 0, len(s))
+	for t := range s {
+		if personalTable(t) {
+			tables = append(tables, t)
+		}
+	}
+	sort.Strings(tables)
+	for _, t := range tables {
+		names := make([]string, 0, len(s[t]))
+		for name := range s[t] {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			c := s[t][name]
+			key := strings.ToLower(t + "." + name)
+			if c.Generated || covered[key] || keep[key] || structuralJSONColumns[key] || feedsGenerated(t, name) {
+				continue
+			}
+			if strings.ToLower(name) == "custom_fields" || c.DataType == "json" {
+				rules = append(rules, Rule{Table: t, Column: name, Kind: KindNull})
+			}
+		}
+	}
+	return mergeRules(rules, cfg.Rules), nil
+}
+
+// generationRefs returns "table.column" (lower case) of every column that a
+// generated column of the same table names in its GENERATION_EXPRESSION.
+// Identifiers are matched as words, so a JSON path naming a column counts
+// too; that only keeps a column raw, it never clears one.
+func generationRefs(s Schema) map[string]bool {
+	refs := map[string]bool{}
+	for t, cols := range s {
+		words := map[string]bool{}
+		for _, c := range cols {
+			if c.GenerationExpression == "" {
+				continue
+			}
+			for _, w := range strings.FieldsFunc(strings.ToLower(c.GenerationExpression), func(r rune) bool {
+				return !(r == '_' || r == '$' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r > 127)
+			}) {
+				words[w] = true
+			}
+		}
+		for name, c := range cols {
+			if !c.Generated && words[strings.ToLower(name)] {
+				refs[strings.ToLower(t+"."+name)] = true
+			}
+		}
+	}
+	return refs
+}
+
+// UnruledTextColumns returns the text and JSON columns of the given tables
+// that no rule rewrites, sorted per table; tables without any are omitted.
+func UnruledTextColumns(s Schema, tables []string, rules []Rule) map[string][]string {
+	ruled := map[string]bool{}
+	for _, r := range rules {
+		ruled[r.Table+"."+r.Column] = true
+	}
+	out := map[string][]string{}
+	for _, t := range tables {
+		var cols []string
+		for name, c := range s[t] {
+			if isText(c.DataType) && !c.Generated && !ruled[t+"."+name] {
+				cols = append(cols, name)
+			}
+		}
+		if len(cols) > 0 {
+			sort.Strings(cols)
+			out[t] = cols
+		}
+	}
+	return out
 }
 
 // NoDataTables keeps only the schema of tables whose rows are transient,
@@ -160,22 +326,69 @@ func NoDataTables() []string {
 	}
 }
 
-// SecretConfigKeys drops system_config rows that hold credentials. The local
-// shop falls back to the defaults; projects re-add sandbox keys via post_sql.
-const SecretConfigKeys = `(password|secret|token|apikey|api_key|accesskey|access_key|privatekey|private_key|clientid|client_id|merchantid|webhook|license|shopid)`
+// Secret system_config rows are dropped; the local shop falls back to the
+// defaults and projects re-add sandbox keys via post_sql. The patterns are
+// matched against the lower-cased key and value, are valid in Go (RE2) as well
+// as in MySQL 5.7 (Henry Spencer), MySQL 8 (ICU) and MariaDB (PCRE), and use
+// no flags or \s, so the SQL filter of the dump and isSecretConfig, which
+// verify runs on the imported rows, decide identically.
+//
+// The key list is deliberately broad: a dropped non-secret key only reverts to
+// its default (e.g. core.loginRegistration.passwordMinLength). "key" counts
+// only at the end of a key segment (apiKey, siteKey, publicKey), so keywords
+// stays; "credential" instead of "cred" keeps credit card toggles. None of the
+// words occurs in core.basicInformation.*, core.listing.* or core.cart.* keys.
+const SecretConfigKeys = `(password|secret|token|apikey|api_key|accesskey|access_key|privatekey|private_key|private|clientid|client_id|merchantid|webhook|license|shopid|hmac|auth|credential|salt|signature|passphrase|dsn|username|key([._]|$))`
+
+// SecretConfigValues finds non-empty secrets nested in a configuration_value,
+// e.g. {"_value": {"clientSecret": "…"}} of plugin configs or captcha settings.
+const SecretConfigValues = `"[a-z0-9_]*(secret|password|privatekey|private_key|apikey|api_key|token)[a-z0-9_]*"[[:space:]]*:[[:space:]]*"[^"]+"`
+
+// protectedConfigKeys identify the source installation and never leave it.
+var protectedConfigKeys = []string{"core.store.shopSecret", "core.app.shopId"}
+
+var (
+	secretConfigKeyRe   = regexp.MustCompile(SecretConfigKeys)
+	secretConfigValueRe = regexp.MustCompile(SecretConfigValues)
+)
+
+// secretKeySQL and secretValueSQL are true for the rows SystemConfigWhere drops.
+func secretKeySQL() string {
+	quoted := make([]string, len(protectedConfigKeys))
+	for i, k := range protectedConfigKeys {
+		quoted[i] = "'" + k + "'"
+	}
+	return "(LOWER(configuration_key) REGEXP '" + SecretConfigKeys + "' OR configuration_key IN (" + strings.Join(quoted, ",") + "))"
+}
+
+func secretValueSQL() string {
+	return "(LOWER(COALESCE(CAST(configuration_value AS CHAR), '')) REGEXP '" + SecretConfigValues + "')"
+}
+
+// isSecretConfig is the Go equivalent of the SQL filter; verify applies it to
+// the imported rows as a second implementation that does not depend on MySQL.
+func isSecretConfig(key, value string) bool {
+	for _, k := range protectedConfigKeys {
+		if key == k {
+			return true
+		}
+	}
+	return secretConfigKeyRe.MatchString(strings.ToLower(key)) || secretConfigValueRe.MatchString(strings.ToLower(value))
+}
 
 // SystemConfigWhere is the WHERE clause applied to system_config.
 func SystemConfigWhere() string {
-	return "configuration_key NOT REGEXP '(?i)" + SecretConfigKeys + "' AND configuration_key NOT IN ('core.store.shopSecret','core.app.shopId')"
+	return "NOT " + secretKeySQL() + " AND NOT " + secretValueSQL()
 }
 
 // Column is the schema metadata needed to render a rule.
 type Column struct {
-	Table     string
-	Name      string
-	Nullable  bool
-	DataType  string
-	Generated bool
+	Table                string
+	Name                 string
+	Nullable             bool
+	DataType             string
+	Generated            bool
+	GenerationExpression string // of a generated column, as information_schema reports it
 }
 
 // Schema maps table → column name → metadata.
@@ -240,7 +453,7 @@ func Expression(r Rule, schema Schema) string {
 	var expr string
 	switch r.Kind {
 	case KindEmail:
-		expr = "CONCAT('" + strings.ReplaceAll(r.Table, "_", "-") + "-', " + hexID + ", '@example.com')"
+		expr = "CONCAT('" + strings.ReplaceAll(r.Table, "_", "-") + "-', " + hexID + ", '@" + PlaceholderEmailDomain + "')"
 	case KindFirstName:
 		expr = elt(crc, firstNames)
 	case KindLastName:

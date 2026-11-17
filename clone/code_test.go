@@ -166,6 +166,11 @@ func TestRsyncArgsOrderUserExcludesThenFixturesThenBuiltins(t *testing.T) {
 	if strings.Contains(dry, "--max-size") || strings.Contains(dry, "--info") {
 		t.Fatalf("dry run must list oversized files and stay openrsync-compatible: %q", dry)
 	}
+	for _, a := range []string{joined, dry} {
+		if !strings.Contains(a, "\x00--copy-unsafe-links\x00") {
+			t.Fatalf("links outside the project must arrive as content in both runs: %q", a)
+		}
+	}
 }
 
 // TestRsyncFiltersKeepFixturesAndDropExports runs the filter chain through the
@@ -190,6 +195,25 @@ func TestRsyncFiltersKeepFixturesAndDropExports(t *testing.T) {
 		"custom/plugins/Acme/src/Resources/dump.sql":              false,
 		"files/Resources/export.csv":                              false,
 		"public/catalogs/old.csv":                                 false,
+		"custom/plugins/X/src/X.php":                              true,
+		"custom/plugins/X/composer.json":                          true,
+		"custom/plugins/Acme/src/Resources/fixtures/a.xls":        true,
+		"config/packages/shopware.yaml":                           true,
+		"frontend/.env":                                           false,
+		"frontend/.env.local":                                     false,
+		".env.dist":                                               false,
+		"custom/plugins/X/auth.json":                              false,
+		".npmrc":                                                  false,
+		"frontend/.npmrc":                                         false,
+		"config/secrets/prod/prod.decrypt.private.php":            false,
+		".shopware-project.yml":                                   false,
+		"deploy/id_ed25519":                                       false,
+		"deploy/id_rsa.pub":                                       false,
+		"certs/shop.p12":                                          false,
+		"backup.sql.bz2":                                          false,
+		"custom/plugins/X/data.dump":                              false,
+		"custom/plugins/X/old.xls":                                false,
+		"var.7z":                                                  false,
 	}
 	src := t.TempDir()
 	for p := range files {
@@ -213,6 +237,53 @@ func TestRsyncFiltersKeepFixturesAndDropExports(t *testing.T) {
 	for p, want := range files {
 		if got[p] != want {
 			t.Errorf("%s transferred=%v, want %v\n%s", p, got[p], want, out)
+		}
+	}
+}
+
+// TestRsyncCopiesUnsafeLinksAsContent covers code that a release links in
+// from outside the project (Deployer shared/, absolute links): it arrives as
+// real files, while the filters still apply to the copied content and to
+// excluded links.
+func TestRsyncCopiesUnsafeLinksAsContent(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not installed")
+	}
+	root := t.TempDir()
+	src := filepath.Join(root, "release")
+	shared := filepath.Join(root, "shared")
+	for _, p := range []string{"plugins/Acme/src/Acme.php", "plugins/Acme/.env", "plugins/Acme/auth.json", "files/upload.jpg"} {
+		full := filepath.Join(shared, p)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(src, "custom"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../../shared/plugins", filepath.Join(src, "custom", "plugins")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(shared, "files"), filepath.Join(src, "files")); err != nil {
+		t.Fatal(err)
+	}
+	dst := t.TempDir()
+	args := append([]string{"-a", "--copy-unsafe-links"}, rsyncFilters(nil)...)
+	if out, err := exec.Command("rsync", append(args, src+"/", dst+"/")...).CombinedOutput(); err != nil {
+		t.Fatalf("rsync: %v\n%s", err, out)
+	}
+	if fi, err := os.Lstat(filepath.Join(dst, "custom", "plugins")); err != nil || fi.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("custom/plugins must be a real directory: %v %v", fi, err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "custom", "plugins", "Acme", "src", "Acme.php")); err != nil {
+		t.Errorf("linked plugin code missing: %v", err)
+	}
+	for _, p := range []string{"custom/plugins/Acme/.env", "custom/plugins/Acme/auth.json", "files"} {
+		if _, err := os.Lstat(filepath.Join(dst, p)); !os.IsNotExist(err) {
+			t.Errorf("%s must not be synced (err %v)", p, err)
 		}
 	}
 }

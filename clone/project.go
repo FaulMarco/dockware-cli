@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -18,6 +20,12 @@ type ProjectConfig struct {
 	NoData []string `yaml:"no_data"`
 	// Rules adds column rewrites on top of the defaults.
 	Rules []Rule `yaml:"rules"`
+	// KeepColumns exports these table.column entries raw although a default rule would clear them.
+	KeepColumns []string `yaml:"keep_columns"`
+	// ExpectedEmailColumns are table.column globs where e-mail addresses are expected (verify does not fail on them).
+	ExpectedEmailColumns []string `yaml:"expected_email_columns"`
+	// RetentionDays is how long a clone may be kept before it is reported as due for removal; 0 = default (30 days).
+	RetentionDays int `yaml:"retention_days"`
 	// Env overrides generated environment variables of the local shop.
 	Env map[string]string `yaml:"env"`
 	// PostSQL runs after import, e.g. sandbox payment keys (path relative to the config file).
@@ -86,6 +94,19 @@ func LoadProjectConfig(path string) (*ProjectConfig, error) {
 			return nil, configError(path, fmt.Sprintf("invalid exclude pattern %q (one rsync pattern per entry)", p), "")
 		}
 	}
+	for _, k := range cfg.KeepColumns {
+		if strings.Count(k, ".") != 1 || strings.HasPrefix(k, ".") || strings.HasSuffix(k, ".") || strings.ContainsAny(k, "*?[ ") {
+			return nil, configError(path, fmt.Sprintf("invalid keep_columns entry %q (one table.column per entry)", k), "")
+		}
+	}
+	for _, p := range cfg.ExpectedEmailColumns {
+		if _, err := pathpkg.Match(p, ""); err != nil || strings.Count(p, ".") != 1 {
+			return nil, configError(path, fmt.Sprintf("invalid expected_email_columns entry %q (one table.column glob per entry, e.g. acme_*.email)", p), "")
+		}
+	}
+	if cfg.RetentionDays < 0 {
+		return nil, configError(path, fmt.Sprintf("retention_days must be 0 or more, got %d", cfg.RetentionDays), "")
+	}
 	if cfg.MaxCodeSizeMB < -1 {
 		return nil, configError(path, fmt.Sprintf("max_code_size_mb must be -1 (no limit), 0 (default) or a size, got %d", cfg.MaxCodeSizeMB), "")
 	}
@@ -111,7 +132,7 @@ func LoadProjectConfig(path string) (*ProjectConfig, error) {
 
 // configError names the file so the user knows which .dockware-clone.yml to fix.
 func configError(path, msg, output string) error {
-	return &Error{Step: StepConfig, Msg: path + ": " + msg, Output: output, Hint: "see docs/clone.md (configuration)"}
+	return &Error{Step: StepConfig, Msg: path + ": " + msg, Output: output, Hint: "see " + DocsURL + " (configuration)"}
 }
 
 // PostSQLPath resolves post_sql relative to the config file.
