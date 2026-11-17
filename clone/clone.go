@@ -157,6 +157,10 @@ func Run(ctx context.Context, o Options) (err error) {
 		if o.CodeDir, err = filepath.Abs(o.CodeDir); err != nil {
 			return Fail(StepConfig, "cannot resolve the code directory", err, "")
 		}
+		// docker creates a missing bind mount source as an empty directory
+		if !fileExists(filepath.Join(o.CodeDir, "composer.json")) {
+			return &Error{Step: StepConfig, Msg: fmt.Sprintf("--code %s has no composer.json", o.CodeDir), Hint: "pass the root of an existing Shopware checkout (the directory with composer.json and bin/console)"}
+		}
 		if insideDir(o.OutDir, o.CodeDir) {
 			return &Error{Step: StepConfig, Msg: fmt.Sprintf("output directory %s is inside the checkout %s", o.OutDir, o.CodeDir), Hint: "pass --out <dir> outside the checkout"}
 		}
@@ -276,6 +280,11 @@ func Run(ctx context.Context, o Options) (err error) {
 	cfg, err := LoadProjectConfig(o.ConfigPath)
 	if err != nil {
 		return err
+	}
+	if cfg.Frontend != nil && !o.NoFrontend && o.CodeDir != "" {
+		if fi, serr := os.Stat(filepath.Join(o.CodeDir, cfg.Frontend.Path)); serr != nil || !fi.IsDir() {
+			return &Error{Step: StepConfig, Msg: fmt.Sprintf("frontend.path %s is not a directory in the checkout %s", cfg.Frontend.Path, o.CodeDir), Hint: "fix frontend.path in the config, or pass --no-frontend"}
+		}
 	}
 
 	// docker has to work before the server is touched; the stream strategy
