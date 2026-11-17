@@ -46,6 +46,11 @@ func (l *Local) WriteFiles() error {
 			return err
 		}
 	}
+	if l.Frontend != nil {
+		if err := writeFile(filepath.Join(l.Dir, "apache-cors.conf"), []byte(frontendCORS), 0o644); err != nil {
+			return err
+		}
+	}
 	if l.OwnsCode {
 		if err := writeFile(filepath.Join(l.CodeDir, ".env"), []byte(dotenv(l.Env)), 0o600); err != nil {
 			return err
@@ -83,6 +88,9 @@ func (l *Local) shopVolumes() []string {
 	if l.MediaURL != "" {
 		v = append(v, "./apache-media.conf:/etc/apache2/conf-enabled/zz-dockware-clone-media.conf:ro")
 	}
+	if l.Frontend != nil {
+		v = append(v, "./apache-cors.conf:/etc/apache2/conf-enabled/zz-dockware-clone-cors.conf:ro")
+	}
 	if l.PHPVersion != "" {
 		// the ini dir is per PHP version, so without a known version the image defaults stay
 		for _, sapi := range []string{"fpm", "cli"} {
@@ -107,6 +115,12 @@ var mediaURLRe = regexp.MustCompile(`^https?://[^\s"'$%\\]+$`)
 
 // ValidMediaURL reports whether url is safe to embed in the Apache rewrite.
 func ValidMediaURL(url string) bool { return mediaURLRe.MatchString(url) }
+
+// frontendCORS answers preflights with the headers asked for: the frontend
+// runs on another origin than the shop, and Shopware allows only its own
+// list, without e.g. sw-currency-id.
+const frontendCORS = `Header always set Access-Control-Allow-Headers "expr=%{req:Access-Control-Request-Headers}" "expr=-n %{req:Access-Control-Request-Headers}"
+`
 
 // mediaFallback redirects media and thumbnail requests whose file does not
 // exist locally to the source, so the clone needs no media copy while local
@@ -166,6 +180,7 @@ func (l *Local) Compose() ([]byte, error) {
 		if f.Install != "" {
 			cmd = f.Install + " && " + f.Command
 		}
+		cmd = l.frontendForwarder(f.Port) + cmd
 		services["frontend"] = map[string]any{
 			"image":          l.FrontendImage(),
 			"container_name": l.Name + "-frontend",
@@ -203,6 +218,25 @@ func (l *Local) Compose() ([]byte, error) {
 		volumeDefs[v] = volumeDef
 	}
 	return yaml.Marshal(map[string]any{"name": l.Name, "services": services, "volumes": volumeDefs})
+}
+
+// frontendForwarder starts a TCP forwarder in the frontend container, so the
+// browser URLs (${SHOP_URL}, ${FRONTEND_URL} on localhost) that a frontend
+// also calls while rendering on the server reach the shop and the dev server
+// there; without it they hit the container itself. Needs node in the image.
+func (l *Local) frontendForwarder(appPort int) string {
+	var routes []string
+	if l.Port != appPort {
+		routes = append(routes, fmt.Sprintf(`[%d,"shop",80]`, l.Port))
+	}
+	if l.FrontPort != appPort && l.FrontPort != l.Port {
+		routes = append(routes, fmt.Sprintf(`[%d,"127.0.0.1",%d]`, l.FrontPort, appPort))
+	}
+	if len(routes) == 0 {
+		return ""
+	}
+	js := `const n=require("net");[` + strings.Join(routes, ",") + `].forEach(([p,h,t])=>n.createServer(c=>{const s=n.connect(t,h);c.pipe(s).pipe(c);s.on("error",()=>c.destroy());c.on("error",()=>s.destroy())}).listen(p,"127.0.0.1"))`
+	return `if command -v node >/dev/null; then node -e '` + js + `' & else echo "no node in the image: localhost:` + strconv.Itoa(l.Port) + ` does not reach the shop while rendering on the server"; fi; `
 }
 
 // compose runs docker compose; its progress output is only shown on failure,
