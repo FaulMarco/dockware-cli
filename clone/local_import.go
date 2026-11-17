@@ -329,7 +329,7 @@ func (l *Local) PostImport(ctx context.Context, p *Probe, domains map[string]str
 				continue
 			}
 			if s[0] == "theme:compile" {
-				retried, ok := l.retryThemeCompile(ctx, out)
+				retried, ok := l.retryThemeCompile(ctx, out, log)
 				if ok {
 					continue
 				}
@@ -344,17 +344,26 @@ func (l *Local) PostImport(ctx context.Context, p *Probe, domains map[string]str
 	return nil
 }
 
-// retryThemeCompile handles two theme:compile failures: Shopware before 6.5
-// has no --active-only, and a static theme config (StaticFileAvailableThemeProvider)
-// needs files/theme-config, which theme:dump writes and the dump does not carry.
-func (l *Local) retryThemeCompile(ctx context.Context, out string) (string, bool) {
+// retryThemeCompile handles three theme:compile failures: Shopware before 6.5
+// has no --active-only, a static theme config (StaticFileAvailableThemeProvider)
+// needs files/theme-config, which theme:dump writes and the dump does not carry,
+// and a fresh checkout lacks the storefront JS that the deploy builds (dist/ is
+// usually gitignored); bin/build-storefront.sh builds it and compiles the themes.
+func (l *Local) retryThemeCompile(ctx context.Context, out string, log io.Writer) (string, bool) {
 	args := []string{"theme:compile", "--active-only"}
+	// Symfony wraps error boxes at the terminal width, also inside words
+	flat := strings.Join(strings.Fields(out), "")
 	switch {
+	case strings.Contains(flat, "forgettobuildthetheme"):
+		fmt.Fprintln(log, "  storefront JS is not built in the code: bin/build-storefront.sh")
+		var built bytes.Buffer
+		err := l.Exec(ctx, "test -x bin/build-storefront.sh && bin/build-storefront.sh", nil, &built, &built)
+		return built.String(), err == nil
 	case strings.Contains(out, "theme:dump"):
 		if dumpOut, err := l.Console(ctx, "theme:dump", "-n"); err != nil {
 			return dumpOut, false
 		}
-	case strings.Contains(out, "active-only"):
+	case strings.Contains(flat, `"--active-only"optiondoesnotexist`):
 		args = args[:1]
 	default:
 		return "", false

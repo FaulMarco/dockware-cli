@@ -55,7 +55,10 @@ Step-by-step guide: [`clone-guide.md`](clone-guide.md).
    server's pair, and in a `--code` checkout, where `config/jwt` is gitignored.
    A shop with a static theme config (`StaticFileAvailableThemeProvider`)
    gets `theme:dump` before `theme:compile`, because `files/theme-config`
-   is not part of the dump.
+   is not part of the dump. A `--code` checkout without the built storefront
+   JS (`Resources/app/storefront/dist`, usually gitignored and built by the
+   deploy) gets `bin/build-storefront.sh`, which builds it into the checkout
+   and compiles the themes.
    An empty `install.lock` is created when it is missing: an `index.php`
    from before 6.6 otherwise redirects every request to the web installer.
    Filesystems the source keeps in object storage (`type: amazon-s3` and
