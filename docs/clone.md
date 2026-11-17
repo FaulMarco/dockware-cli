@@ -56,6 +56,14 @@ Step-by-step guide: [`clone-guide.md`](clone-guide.md).
    A shop with a static theme config (`StaticFileAvailableThemeProvider`)
    gets `theme:dump` before `theme:compile`, because `files/theme-config`
    is not part of the dump.
+   An empty `install.lock` is created when it is missing: an `index.php`
+   from before 6.6 otherwise redirects every request to the web installer.
+   Filesystems the source keeps in object storage (`type: amazon-s3` and
+   similar in `config/packages` or `config/packages/<env>`) become local:
+   the clone writes `config/packages/<env>/zz-dockware-clone.yaml`, because
+   their credentials are not copied. Missing media redirect to the public
+   URL of the source filesystem. With `--code` the file stays in the
+   checkout; it is not tracked by git unless you add it.
 8. Optional headless frontend from the config, then **smoke tests**:
    storefront, Store API, Admin API login, frontend SSR.
 

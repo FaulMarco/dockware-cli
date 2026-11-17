@@ -293,6 +293,10 @@ func (l *Local) PostImport(ctx context.Context, p *Probe, domains map[string]str
 			return Fail(StepPostImport, "post_sql "+postSQL+" failed", err, "")
 		}
 	}
+	// the server's install.lock is not synced; an index.php from before 6.6 redirects every request to the web installer without it
+	if err := l.Exec(ctx, "test -e install.lock || touch install.lock", nil, io.Discard, io.Discard); err != nil {
+		return Fail(StepPostImport, "cannot create install.lock", err, "")
+	}
 	list, _ := l.Console(ctx, "list", "system", "--raw")
 	var steps [][]string
 	// config/jwt stays on the server (CodeExcludes) and a checkout ignores it;

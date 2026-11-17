@@ -196,7 +196,7 @@ func BuildEnv(p *Probe, l *Local, overrides map[string]string) (env map[string]s
 		"MESSENGER_TRANSPORT_FAILURE_DSN":      "doctrine://default?queue_name=failed&auto_setup=1",
 		"BLUE_GREEN_DEPLOYMENT":                "0",
 		"COMPOSER_HOME":                        "/var/www/.composer",
-		// install.lock is not copied; this skips the web installer redirect
+		// install.lock is not copied (PostImport creates it); this covers index.php versions that read the env instead
 		"SHOPWARE_SKIP_WEBINSTALLER": "1",
 	}
 	known := map[string]bool{}
