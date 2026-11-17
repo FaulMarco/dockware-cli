@@ -324,15 +324,38 @@ func (l *Local) PostImport(ctx context.Context, p *Probe, domains map[string]str
 			if s[0] == "user:create" && strings.Contains(out, "already") {
 				continue
 			}
-			if s[0] == "theme:compile" && strings.Contains(out, "active-only") {
-				if _, err := l.Console(ctx, "theme:compile"); err == nil {
+			if s[0] == "theme:compile" {
+				retried, ok := l.retryThemeCompile(ctx, out)
+				if ok {
 					continue
+				}
+				if retried != "" {
+					out = retried
 				}
 			}
 			return Fail(StepPostImport, "bin/console "+strings.Join(s, " ")+" failed", err, tailLines(out, 25))
 		}
 	}
 	return nil
+}
+
+// retryThemeCompile handles two theme:compile failures: Shopware before 6.5
+// has no --active-only, and a static theme config (StaticFileAvailableThemeProvider)
+// needs files/theme-config, which theme:dump writes and the dump does not carry.
+func (l *Local) retryThemeCompile(ctx context.Context, out string) (string, bool) {
+	args := []string{"theme:compile", "--active-only"}
+	switch {
+	case strings.Contains(out, "theme:dump"):
+		if dumpOut, err := l.Console(ctx, "theme:dump", "-n"); err != nil {
+			return dumpOut, false
+		}
+	case strings.Contains(out, "active-only"):
+		args = args[:1]
+	default:
+		return "", false
+	}
+	retried, err := l.Console(ctx, args...)
+	return retried, err == nil
 }
 
 // copyInto streams hostDir into dir (relative to the project root) of the

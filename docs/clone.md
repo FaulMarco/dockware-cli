@@ -53,6 +53,9 @@ Step-by-step guide: [`clone-guide.md`](clone-guide.md).
    Before 6.7 a missing `config/jwt/private.pem` is generated
    (`system:generate-jwt-secret`): in the synced code, which never gets the
    server's pair, and in a `--code` checkout, where `config/jwt` is gitignored.
+   A shop with a static theme config (`StaticFileAvailableThemeProvider`)
+   gets `theme:dump` before `theme:compile`, because `files/theme-config`
+   is not part of the dump.
 8. Optional headless frontend from the config, then **smoke tests**:
    storefront, Store API, Admin API login, frontend SSR.
 
